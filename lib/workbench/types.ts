@@ -75,24 +75,23 @@ export type Protocol = {
   box: { x: number; y: number; z: number; geometry: string; unit?: "nm" | "angstrom" }
   replicas: number
   randomSeedBase: number
-  em: { method: string; maxSteps: number; fmax: number }
-  nvt: { durationNs: number; thermostat: string; tauTPs: number; timestepFs: number }
-  npt: { durationNs: number; barostat: string; tauPPs: number; timestepFs: number }
+  em: { method: "steep" | "cg"; maxSteps: number; fmax: number }
+  nvt: { durationNs: number; thermostat: "V-rescale" | "Nose-Hoover" | "Berendsen"; tauTPs: number; timestepFs: number }
+  npt: { durationNs: number; barostat: "Parrinello-Rahman" | "C-rescale" | "Berendsen"; tauPPs: number; timestepFs: number; compressibilityBarInverse: number | null }
   production: {
-    pureDesNs: number
-    soluteMinNs: number
-    soluteMaxNs: number
-    exactOrRange: "exact" | "range"
+    pureDes: { enabled: boolean; durationNs: number }
+    solute: { mode: "fixed" | "convergence-controlled"; initialNs: number; maximumNs: number; extensionNs: number }
     framePs: number
     timestepFs: number
   }
   nonbonded: {
     cutoffNm: number
-    coulombMethod: string
+    coulombMethod: "PME" | "Cut-off"
     pmeOrder: number
     fourierSpacingNm: number
   }
-  constraints: string
+  constraints: "none" | "h-bonds" | "all-bonds"
+  constraintAlgorithm: "lincs" | "shake"
   equilibrationNotes: string
   productionNotes: string
   mdpOverrides?: { em: string; nvt: string; npt: string; prod: string }
@@ -116,6 +115,11 @@ export type RunNaming = {
 }
 
 export type ProjectState = {
+  createdWithVersion?: string
+  originalSchemaVersion?: string
+  lastOpenedWithVersion?: string
+  currentSchemaVersion?: string
+  migrationHistory?: Array<{ from: string; to: string; at: string; softwareVersion: string; note: string }>
   schemaVersion: string
   softwareVersion: string
   projectId: string
@@ -124,6 +128,7 @@ export type ProjectState = {
   description: string
   presetName: string
   mode: "thesis" | "custom"
+  runDesign?: { mode: "A" | "B" | "C" | "custom"; custom: { desIds: string[]; soluteIds: string[]; soluteCounts: string; temperaturesK: string; pressuresBar: string; boxSizesNm: string; replicas: number } }
   researchObjective: string
   notes: string
   defaultUnits: { distance: string; temperature: string; pressure: string; time: string }
@@ -159,6 +164,15 @@ export type ProjectState = {
 }
 
 export type RunRecord = {
+  inputSnapshots?: Array<{ id: string; generatedAt: string; softwareVersion: string; files: Array<{path:string;content:string;sha256:string}>; molecularSources: unknown; researcherReviewed: boolean }>
+  projectId?: string
+  systemKind?: "pure-des" | "solute"
+  scientificState?: ScientificStatePoint
+  resolvedProtocol?: ResolvedSimulationProtocol
+  molecularSnapshot?: Molecule[]
+  generatedAt?: string
+  createdWithVersion?: string
+  provenanceStatus?: "resolved" | "legacy-unresolved"
   runId: string
   stage: string
   desId: string
@@ -233,6 +247,21 @@ export type CompositionCalculationMetadata = {
 }
 
 export type RDFDataset = {
+  inputSnapshotId?: string
+  initializationSeed?: number
+  importedAt?: string
+  createdWithVersion?: string
+  windowKind?: "full" | "block" | "cumulative"
+  replicaRepresentative?: boolean
+  projectId?: string
+  sourceText?: string
+  sourceHash?: string
+  seriesIndex?: number
+  scientificState?: ScientificStatePoint
+  observable?: ObservableIdentity
+  trajectory?: { id: string; runId: string; filename: string; sha256: string; actualVolumeNm3: number; volumeSource: string; evidenceSource: "researcher-reported" | "manifest-verified" }
+  provenanceStatus?: "unknown" | "researcher-mapped" | "run-manifest-verified" | "legacy-unresolved"
+  analysisHistory?: KBIAnalysis[]
   id: string
   sourceFilename: string
   sourceFormat: "xvg" | "csv"
@@ -269,6 +298,16 @@ export type RDFDataset = {
 }
 
 export type KBIAnalysis = {
+  id?: string
+  projectId?: string
+  sourceDatasetId?: string
+  sourceHash?: string
+  inputSignature?: string
+  createdWithVersion?: string
+  lowerBoundNm?: number
+  originTreatment?: "measured-zero" | "unmeasured-gap" | "researcher-g0"
+  originG?: number
+  decision?: ResearchDecision
   rawRunningKbiNm3: number[]
   radiusNm: number[]
   runningKbiNm3: number[]
@@ -285,13 +324,21 @@ export type KBIAnalysis = {
   plateauVariance: number
   plateauStatus: "candidate" | "accepted" | "rejected" | "manual" | "unstable"
   integrationMethod: "trapezoidal" | "simpson"
-  smoothing: string
+  smoothing: "none" | "moving-average"
   smoothingWindow: number
   rebinFactor: number
   analyzedAt: string
 }
 
 export type SSMPoint = {
+  projectId?: string
+  runId?: string
+  datasetId?: string
+  analysisId?: string
+  scientificState?: ScientificStatePoint
+  observable?: ObservableIdentity
+  estimator?: "independent-box-running-kbi"
+  uncertaintyKind?: "replica-sem" | "not-estimated"
   id: string
   stateKey: string
   desId: string
@@ -309,6 +356,14 @@ export type SSMPoint = {
 }
 
 export type SSMFit = {
+  decisionHistory?: ResearchDecision[]
+  fitInputs?: { minimumDistinctSizes: number; aggregatedPoints: Array<{ sourcePointIds: string[]; effectiveLengthNm: number; finiteKbiNm3: number; uncertaintyNm3: number | null }> }
+  projectId?: string
+  familyId?: string
+  observableId?: string
+  sourceDatasetIds?: string[]
+  decision?: ResearchDecision
+  softwareVersion?: string
   id: string
   stateKey: string
   pairKey: string
@@ -328,6 +383,19 @@ export type SSMFit = {
 }
 
 export type ThermodynamicResult = {
+  densitySourceId?: string
+  evidenceSignature?: string
+  matrixTerms?: Array<{ pair: [string,string]; sourceId: string; kind: "ssm" | "replicas"; value: number; uncertainty: number | null; datasetIds: string[] }>
+  projectId?: string
+  scientificState?: ScientificStatePoint
+  sourceDatasetIds?: string[]
+  sourceAnalysisIds?: string[]
+  sourceDecisionIds?: string[]
+  uncertaintyProvenance?: Array<{ pair: [string, string]; kind: "replica-sem" | "ssm-regression-se" | "unknown"; sourceIds: string[] }>
+  propagationAssumption?: string
+  propagationSettings?: { covariance?: number[][]; conditionLimit: number; samples: number; seed: number }
+  override?: ResearchDecision
+  softwareVersion?: string
   id: string
   stateKey: string
   desId: string
@@ -341,16 +409,30 @@ export type ThermodynamicResult = {
   kbiUncertaintyNm3: number[][]
   transformedB: number[][]
   inverseB: number[][]
+  structureFactor?: number[][]
+  inverseStructureFactor?: number[][]
+  gibbsProjection?: number[][]
   determinantB: number
   conditionNumber: number
   gammaMatrix: number[][]
   fixedDesRatioSoluteGamma: number
-  uncertainty?: { sd: number; ci95: [number, number]; validSamples: number; requestedSamples: number }
+  uncertainty?: { sd: number; ci95: [number, number]; validSamples: number; requestedSamples: number; samples?: number[]; seed?: number; assumption?: string }
   sourceTermIds: string[]
   createdAt: string
 }
 
 export type ActivityResult = {
+  stateId?: string
+  decisionHistory?: ResearchDecision[]
+  sourceSignature?: string
+  decision?: ResearchDecision
+  uncertainty?: { assumption: string; samples: number; seed: number; points: Array<{ x: number; sd: number; ci95: [number,number] }> }
+  projectId?: string
+  sourceThermodynamicIds?: string[]
+  seriesIdentity?: { desComponents: ScientificStatePoint["desComponents"]; soluteId: string; temperatureK: number; pressureBar: number; forceField: string; chargeSource: string }
+  anchorSource?: string
+  accepted?: boolean
+  softwareVersion?: string
   id: string
   desId: string
   soluteId: string
@@ -358,11 +440,17 @@ export type ActivityResult = {
   interpolation: "linear" | "monotone-cubic"
   points: Array<{ x: number; thermodynamicFactor: number; lnGammaRelative: number; gammaRelative: number; gammaAbsolute: number | null }>
   anchor: { type: "none" | "composition" | "infinite-dilution"; x: number | null; gamma: number | null }
-  infiniteDilution?: { model: "linear" | "quadratic"; gammaInfinity: number; lnGammaInfinity: number; r2: number; ci95: [number, number]; maxX: number; sensitivity: number | null }
+  infiniteDilution?: { model: "linear" | "quadratic"; gammaInfinity: number; lnGammaInfinity: number; r2: number; ci95: [number, number]; maxX: number; sensitivity: number | null; decision?: ResearchDecision; coefficients?: number[]; residuals?: number[]; sampledX?: number[] }
   createdAt: string
 }
 
 export type CosmoRecord = {
+  pressureBar?: number | null
+  compatibilityReview?: { rationale: string; timestamp: string; standardStateCompatible: boolean; independentAnchor: boolean }
+  projectId?: string
+  sourceText?: string
+  sourceHash?: string
+  mapping?: { desComponents: ScientificStatePoint["desComponents"]; soluteId: string; mappedBy: "researcher"; rationale: string; timestamp: string }
   id: string
   des: string
   hba: string
@@ -378,6 +466,10 @@ export type CosmoRecord = {
 }
 
 export type ObservableRecord = {
+  projectId?: string
+  scientificState?: ScientificStatePoint
+  sourceText?: string
+  sourceHash?: string
   id: string
   runId: string
   desId: string
@@ -406,6 +498,8 @@ export type ValidationResult = {
 }
 
 export type ScientificState = {
+  comparisons?: Array<{ id: string; projectId: string; sourceIds: string[]; result: unknown; timestamp: string; softwareVersion: string }>
+  projectId?: string
   schemaVersion: "0.2"
   ssmPoints: SSMPoint[]
   ssmFits: SSMFit[]
@@ -415,6 +509,53 @@ export type ScientificState = {
   observables: ObservableRecord[]
   validationResults: ValidationResult[]
   matrixOverrides: Array<{ stateKey: string; reason: string; timestamp: string }>
-  convergenceDecisions: Array<{ stateKey: string; classification: "not-converged" | "possibly-converged" | "converged-accepted"; rationale: string; timestamp: string }>
+  convergenceDecisions: ConvergenceDecision[]
   commandProvenance: Array<{ type: "ssm" | "gromacs"; settings: Record<string, unknown>; timestamp: string }>
+}
+
+export type ConvergenceDecision = {
+  id?: string; projectId?: string; stateKey: string; observableId?: string; trajectoryId?: string
+  sourceDatasetIds?: string[]; sourceAnalysisIds?: string[]; timeWindows?: Array<[number, number]>
+  diagnostics?: { slopeNm3PerNs: number; sdNm3: number; maxSlope: number; maxSd: number; recommendation: string; windowKind: string }
+  classification: "not-converged" | "possibly-converged" | "converged-accepted"; rationale: string; timestamp: string; softwareVersion?: string
+}
+
+/** Canonical identity. Unknown metadata never acts as a wildcard. */
+export type ScientificStatePoint = {
+  parameterizationIdentity?: string
+  molecularModel?: string
+  projectId: string
+  desId: string
+  desComponents: Array<{ moleculeId: string; ratio: number }>
+  systemKind: "pure-des" | "solute"
+  soluteId: string | null
+  composition: Array<{ moleculeId: string; count: number; moleFraction: number }>
+  temperatureK: number
+  pressureBar: number
+  boxDimensionsNm: [number, number, number]
+  forceField: string
+  chargeSource: string
+  replica: number
+}
+export type ObservableIdentity = {
+  speciesA: string; speciesB: string
+  observableType: "molecular-com-rdf" | "atom-rdf" | "custom-rdf"
+  selectionA: string; selectionB: string
+  normalization: "gromacs-rdf" | "researcher-specified"
+}
+export type ResearchDecision = {
+  id: string; projectId: string; stateId: string; sourceIds: string[]
+  classification: string; rationale: string; timestamp: string; softwareVersion: string
+  actor: "researcher"; failedValidation?: string[]
+}
+export type ResolvedSimulationProtocol = {
+  id: string; projectId: string; softwareVersion: string
+  forceField: string; chargeSource: string; topologyInclude: string
+  temperatureK: number; pressureBar: number; randomSeed: number
+  velocityPolicy: "generate-nvt-continue-checkpoints"
+  systemKind: "pure-des" | "solute"
+  production: { mode: "fixed" | "convergence-controlled"; initialNs: number; maximumNs: number; extensionNs: number; execution: "external-manual" }
+  stages: Record<"em" | "nvt" | "npt" | "prod", { directives: Record<string, string>; mdp: string; durationNs: number | null }>
+  diagnostics: CompositionDiagnostic[]
+  inputSettings: Protocol
 }

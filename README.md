@@ -1,181 +1,95 @@
 # SolvForge MD
 
-**Local-first molecular simulation planning and Kirkwood–Buff analysis for reproducible solvent research.**
+Local-first GROMACS preparation and molecular Kirkwood–Buff analysis for reproducible solvent research. Version **1.0.2**, project archive schema **2.0**, **GPL-3.0-only**.
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-31584a.svg)](package.json)
+The application generates files and analyzes imported numerical observations. ORCA, Packmol and GROMACS execute externally. Every accepted scientific result keeps its source IDs, actual generated protocol, physical state, numerical settings and researcher decisions. Missing or rejected evidence blocks downstream calculations.
 
-SolvForge MD is research software for designing GROMACS molecular-dynamics studies, preparing molecular systems from ORCA outputs, and analysing Kirkwood–Buff integrals (KBI). It was developed around a deep eutectic solvent (DES) thesis workflow, but every molecule, composition, state point, simulation parameter, and analysis setting remains editable.
+## Start with the thesis preset
 
-The application is deliberately conservative: missing evidence produces a diagnostic instead of a fabricated result. It does not execute ORCA, Packmol, or GROMACS in the browser.
+**Andaliman Thesis MD/KBI** retains the hierarchical design:
 
-## Scientific workflow
+1. Stage A: four DES candidates × three solutes at 323.15 K, before replicas.
+2. Explicit researcher champion selection.
+3. Stage B: champion DES × three solutes × loadings 1, 2, 3, 6, 12, 18, 24.
+4. Explicit researcher optimum selection.
+5. Stage C: champion and selected nominal loading × three solutes × five temperatures.
 
-```mermaid
-flowchart TD
-    A[ORCA geometry and Mulliken charges] --> B[Atom mapping and OPLS-AA review]
-    B --> C[Box composition and Packmol]
-    C --> D[GROMACS EM, NVT, NPT, production]
-    D --> E[RDF and block RDF data]
-    E --> F[Running KBI and convergence]
-    F --> G[SSM thermodynamic-limit extrapolation]
-    G --> H[Multicomponent KB matrix]
-    H --> I[Thermodynamic factor and activity coefficient]
-    I --> J[COSMO-RS cross-validation]
-```
+A full factorial matrix is a separate, explicit custom design. Thesis/custom are preset labels. Supported parameters, molecule definitions, state points and analysis settings remain editable in both presets. Unsupported force-field and charge alternatives are disabled.
 
-The built-in **Andaliman Thesis MD/KBI** preset preserves the intended hierarchy:
+The implemented parameterization is **OPLS-AA + unnormalized ORCA BP86/def2-TZVP Mulliken charges**. ORCA geometry and charges do not contain the OPLS-AA mechanical parameter framework. Import and review the independent topology/atom mapping before preparing a runnable system.
 
-1. Stage A: four DES candidates × three solutes at 323.15 K.
-2. Researcher explicitly selects a champion DES.
-3. Stage B: champion DES × seven editable solute loadings at 323.15 K.
-4. Researcher explicitly selects an optimum concentration.
-5. Stage C: champion DES and selected concentration × five editable temperatures.
+## Preparation and simulation
 
-SolvForge MD never silently converts this workflow into a full temperature × concentration factorial design. Arbitrary factorial matrices remain available in Custom Mode.
+1. Review molecular identities, formal charges, residue names and molecular weights.
+2. Supply manual component counts or calculate integer counts from box volume, a researched density and molecular masses. A molar ratio alone never supplies absolute counts. Review density temperature, mass policy, integer rounding and optional locked DES populations.
+3. Review the protocol, including a researched compressibility. There is no assumed water compressibility. The generator uses validated GROMACS enumerations for integrators, coupling, constraints and electrostatics.
+4. Generate the chosen run matrix. Each run stores an immutable resolved protocol and molecular system snapshot. Separate pure-DES runs have no fictitious solute.
+5. Import original `.xyz`/`.out` files in **ORCA → GROMACS**. Verify atom ordering, charge sum, geometry, connectivity and the imported OPLS-AA topology. The final atom charges are the mapped, unmodified Mulliken values.
+6. Generate molecular PDB/GRO/ITP and Packmol input. Run Packmol externally, then import `packed.pdb`. The system checks counts and molecular/atom ordering against `topol.top` and `index.ndx`.
+7. Export a **Run Input Package** from **Data / Export**. Its exact files and SHA-256 checksums become a frozen input snapshot. Existing snapshots can be downloaded without regenerating them from current forms.
+8. Execute and inspect EM → NVT → NPT → production using the English tutorial. NVT generates velocities with the run's unique replica seed; later stages consume checkpoints.
+9. For convergence-controlled production, use **Manual production continuation**. Enter the completed time, checkpoint checksum, log reference and rationale. The generated `convert-tpr`/`mdrun -cpi -append` commands respect the stored maximum. SolvForge does not autonomously extend simulations.
 
-## Core capabilities
+Protocol overrides are merged into the exact MDP maps used by the files, run manifest and report. Duplicate/malformed directives, invalid steps, state mismatches and incompatible velocity/coupling policies block runnable export. Unusual but supported settings remain researcher choices. GROMACS `grompp` is the final external parameter-resolution check; a manually checked execution state is labelled researcher-reported.
 
-### Experimental design and GROMACS planning
+## RDF → KBI → thermodynamics
 
-- Editable molecule registry, DES definitions, ratios, temperatures, pressures, boxes, replicas, and protocols.
-- Deterministic run IDs backed by complete manifests.
-- Stage A, B, C, and arbitrary custom matrices.
-- Editable EM, NVT, NPT, and production `.mdp` generation.
-- `.mdp` diagnostics for malformed or conflicting directives.
-- Reproducible run directories, shell commands, JSON/CSV manifests, and ZIP export.
+- Import XVG or CSV, preserve the source text/hash and explicitly choose nm or Å. Grace comments, legends, scientific notation and multiple series are parsed. Reimporting identical source bytes cannot create another independent replica.
+- Map each series to a generated run, frozen input snapshot, molecular pair, actual selection, trajectory checksum, time window and measured equilibrated mean volume. Unmapped data remain viewable but cannot establish thermodynamic evidence.
+- Calculate `G(R) = 4π ∫ [g(r)−1]r² dr` with trapezoidal or supported Simpson integration. Raw, rebinned and optionally smoothed data remain separate. An unmeasured origin contribution is unresolved unless explicitly supplied by the researcher.
+- Inspect/select a plateau and record its acceptance rationale. Automatic suggestions are candidates. Radial SD is descriptive plateau variation, never substituted for replica SEM.
+- Use one explicit representative for each independent replica and pair. Distinct pair observables remain separate. Time convergence uses at least three windows of the same trajectory, state and pair; no project-wide mixing or silent outlier removal occurs.
+- Design independent finite-size systems with proportionally scaled particle counts and boxes. Execute them externally and link each measurement to its actual run and measured volume. Regression fits `G(L)=G∞+F∞/L` or `LG(L)=LG∞+F∞` using at least three distinct sizes. This is an explicitly selected independent-box scaling model, not an open-subvolume estimator obtained by cropping a trajectory.
+- Build the six independent terms of the ternary solute + two molecular DES component matrix. Exact state matching, accepted plateaus, current time decisions and finite-size evidence are required. An explicit finite-size/conditioning override must retain its rationale, failed criteria and source IDs. Missing matrix terms cannot be invented.
+- Calculate the constant-pressure ternary thermodynamic factor using the documented structure-factor/Gibbs–Duhem projection. Inspect the full matrices, density vector, determinant, condition number and uncertainty inputs. No automatic binary DES pseudocomponent approximation is used.
+- Integrate `(Γ−1)/x` between sampled compositions with linear or monotone-cubic interpolation. This determines a relative activity coefficient. Absolute γ requires a referenced in-domain anchor and standard-state convention; the software does not manufacture the integration constant.
+- Explicit low-x fits can extrapolate accepted absolute γ toward infinite dilution. One molecule per box is not automatically infinite dilution. A one-solute system also cannot provide a molecular solute–solute RDF, so a complete matrix may be unavailable there.
+- Import openCOSMO-RSpy CSV using column mapping. Reviewed molecular identity, ratio, T, P, quantity and actual composition must match exactly. Compare finite γ(x) only with γ(x), and γ∞ only with accepted MD extrapolation. Standard-state compatibility and anchor independence must be reviewed before cross-validation.
 
-### Physical box composition
+The in-app **Method / Equations** panel describes the equations actually implemented. Uncertainty types and parents are explicit: replica SEM, finite-size regression SE, or unknown. Monte Carlo supports independent normal KBI errors or a supplied joint covariance. Activity propagation resamples stored Γ draws with a reproducible seed. Density/composition/anchor errors and cross-composition correlations are not inferred.
 
-- Manual molecule-count mode.
-- Density-based integer composition from box volume, molecular weights, molar ratio, and optional solute mass.
-- Alternative nearby integer candidates with density deviations.
-- Explicit solute-mass policy and optional locked DES counts across a concentration series.
-- Mole fractions, mass fractions, number densities, and temperature-aware density provenance.
-- No absolute count is ever generated from a molar ratio alone.
+Stage dashboards display pair-specific evidence and imported observables. The explicit Pareto comparison exposes its objectives and directions, excludes missing evidence, and does not select a champion or collapse values into a hidden score.
 
-### ORCA → GROMACS preparation
+## Ownership, archives and reports
 
-- Import and preserve paired ORCA `.xyz` and `.out` files.
-- Parse final coordinates, atom order, method/basis metadata, formal charge, and raw Mulliken atomic charges.
-- Validate atom count, element sequence, geometry, charge count, and total charge.
-- Explicit atom mapping when `.xyz` and `.out` orders differ.
-- Deterministic, editable atom and residue names with exported `atom_mapping.csv`.
-- Coordinate conversion from Å to GROMACS-compatible nm without silent reordering.
-- Reviewable covalent-radius connectivity suggestions.
-- Import and review OPLS-AA/`x2top` topology information.
-- Controlled merge of OPLS-AA mechanical parameters with the thesis Mulliken charges.
-- Molecular `.itp`, PDB, GRO, Packmol, `topol.top`, index, RDF, block-RDF, and SSM file generation.
-- Interactive English tutorial explaining inputs, outputs, commands, checks, and common failures for every MD stage.
+One IndexedDB workspace per `projectId` contains runs, RDFs, preparation state, scientific results, custom presets, decisions and the provenance graph. New projects and recovered presets start clean. Importing a design manifest alone does not inherit previous evidence. Complete bundles restore all slices atomically. Deliberate evidence duplication creates a new project identity and requires renewed acceptance.
 
-The thesis preset intentionally uses **OPLS-AA with raw Mulliken-derived charges from ORCA BP86/def2-TZVP**. SolvForge MD does not silently normalise those charges or substitute another charge model.
+The packages have distinct meanings:
 
-ORCA outputs are not a complete force field. Missing atom types, Lennard–Jones parameters, bonded parameters, exclusions, or unresolved atom mapping keep the topology marked **INCOMPLETE — NOT READY FOR PRODUCTION MD**.
+| Export | Contents / purpose |
+|---|---|
+| MDP Planning Package | Design, run manifests and MDPs; requires molecular and packed inputs before execution. |
+| Run Input Package | Frozen MDPs, resolved protocol, molecular topology/sources/mapping, packing inputs, coordinates, index and commands. |
+| Complete Project Archive | Entire workspace, raw imported sources, frozen packages, calculations, decisions, overrides, provenance and SHA-256 inventory. |
 
-### RDF, KBI, and convergence
+Complete ZIP imports verify CRC, inventory, SHA-256, frozen MDP agreement and raw RDF numerical arrays before restoration. The safe typed-array ZIP implementation supports tested 1, 10 and 50 MB text sources. It uses STORE entries; ZIP64 and archives above its 4 GiB/65,535-entry limits are unsupported. Browser memory and storage quotas still apply.
 
-- Actual GROMACS `.xvg` and CSV parsing with explicit unit selection.
-- Raw, rebinned, and reversibly smoothed RDF series.
-- Trapezoidal and supported composite-Simpson running KBI integration:
+**Generate Analysis Report** exports JSON or printable HTML (browser Print / Save PDF). Each result links backwards through decisions, calculations, exact source terms, RDFs, external trajectory references, frozen inputs and original molecular sources. Missing or stale ancestors are labelled; historical creation software and migrations are preserved. Full trajectories, execution logs and installed force-field distributions remain external and must be retained with their recorded checksums.
 
-  $$G_{ij}(R)=4\pi\int_0^R [g_{ij}(r)-1]r^2\,dr$$
+## Develop and test
 
-- Manual plateau selection and configurable candidate-plateau diagnostics.
-- Replica means, SD, SEM, confidence intervals, and disagreement flags without automatic outlier deletion.
-- Time-block and accumulated-time convergence analysis with researcher-controlled acceptance.
-
-### Finite-size and thermodynamic analysis
-
-- SSM command generation and regression using
-
-  $$G_{ij}^{V}(L)=G_{ij}^{\infty}+\frac{F_{ij}^{\infty}}{L}$$
-
-- Regression uncertainty, confidence intervals, residuals, leverage, and goodness-of-fit.
-- Complete symmetric multicomponent KB matrix with missing/unconverged/finite-size-corrected states.
-- Ternary solute + two-component DES thermodynamic-factor calculation without silently treating the DES as a pseudocomponent.
-- Matrix determinant, inverse, conditioning diagnostics, and Monte Carlo uncertainty propagation.
-- Discrete-composition activity-coefficient integration and controlled infinite-dilution extrapolation.
-- openCOSMO-RSpy CSV mapping, compatible-quantity checks, correlation/error statistics, residuals, and ranking comparison.
-
-### Reproducibility
-
-- Local browser persistence with project JSON import/export.
-- Raw imported numerical data retained separately from processed results.
-- Full provenance for molecular composition, simulation settings, RDF processing, KBI plateaus, convergence, SSM, matrix calculations, uncertainty, and researcher overrides.
-- Complete project ZIP and printable/machine-readable analysis reports.
-- Internal numerical validation tests with explicit PASS/FAIL results.
-
-## Getting started
-
-### Use the application
-
-1. Open SolvForge MD and choose **Andaliman Thesis MD/KBI** or Custom Mode.
-2. Review the molecule registry and enter density information or manual molecule counts.
-3. Generate the required Stage A runs.
-4. Open **ORCA → GROMACS**, enable Tutorial Mode, and import one `.xyz` plus one `.out` per molecular species.
-5. Resolve atom mapping, connectivity, OPLS-AA types, and topology diagnostics.
-6. Generate Packmol and GROMACS project files.
-7. Run Packmol and GROMACS externally, following the generated tutorial/checklist.
-8. Import the resulting RDF `.xvg` files into the KBI Analyzer.
-9. Validate plateaus, replicas, time convergence, finite-size behaviour, and the KB matrix before thermodynamic calculations.
-10. Export the complete project regularly. Browser storage is convenient, but the exported project is the portable research record.
-
-### Run locally
-
-Requirements:
-
-- Node.js 22.13 or newer
-- npm
+Use Node.js 22.13+ (Node 24 tested) and npm:
 
 ```bash
-git clone https://github.com/iehoshva/solvforge-md.git
-cd solvforge-md
 npm install
 npm run dev
+npm test
+npx tsc --noEmit
 ```
 
-Open the local address printed by the development server.
+`npm test` builds and runs numerical, scientific contract, independent ZIP extraction and rendering tests. Python 3 is used by independent ZIP-extraction checks; `cpp` checks generated topology preprocessor ordering. Test fixtures are explicitly synthetic and are never imported by application code. Neither check substitutes for external GROMACS validation.
 
-Useful commands:
+Browser E2E phases are in `tests/browser-e2e.mjs`; fixture creation is in `scripts/create-e2e-fixtures.mjs`. The harness accepts an existing supported browser-client Tab, performs normal UI/file chooser actions and does not inject browser storage or hidden application state. See [verification record](docs/verification.md) for executed checks and unverified boundaries; passing unit tests is not physical MD validation.
 
-```bash
-npm run lint     # static checks
-npm test         # production build and numerical/UI tests
-npm run build    # production build only
-```
+Architecture and control trace: [implementation audit](docs/implementation-trace.md).
 
-ORCA, Packmol, and GROMACS are external scientific programs and must be installed separately when executing the exported workflow.
+## Scope and limitations
 
-## Repository structure
-
-```text
-app/                         Application entry point and global styling
-components/workbench/        Scientific views and interactive workflow
-lib/workbench/               Numerical methods, parsers, generators, and models
-tests/                       Deterministic scientific and rendering tests
-scripts/                     Build and environment helpers
-```
-
-Scientific numerical code is kept separate from the UI so that individual methods can be audited or replaced by a future NumPy/SciPy backend.
-
-## Scientific responsibility
-
-Generated inputs are research artifacts, not a guarantee that a chosen force field, charge model, density, box size, equilibration duration, cutoff, finite-size model, or plateau is appropriate for a particular system. Always inspect GROMACS warnings and energies, validate density and equilibration, test convergence and finite-size effects, and document every manual override.
-
-No generated topology should be used for production MD while SolvForge MD reports unresolved atom mapping, missing parameters, coordinate/topology count disagreement, or a failed external `gmx grompp` validation.
-
-## Contributing
-
-Issues and pull requests are welcome. Changes to scientific algorithms should include:
-
-- the implemented equation and assumptions;
-- units and numerical method;
-- deterministic validation data or an analytic reference;
-- tests covering valid inputs and insufficient-data behaviour;
-- matching updates to the in-app **Method / Equations** documentation.
+- **Requires external execution:** ORCA, OPLS-AA parameter resolution, Packmol, GROMACS, checkpoints and physical equilibration diagnostics.
+- **Scientific limitation:** independent-box 1/L regression is a model to assess, not proof that a thermodynamic-limit estimate is valid. Absolute γ requires external reference information; extrapolation remains model dependent.
+- **Not implemented:** automatic GROMACS execution/log validation, arbitrary N-component thermodynamic inversion, and open-subvolume fluctuation estimators. Unsupported alternatives are not exposed as functioning controls.
+- **Engineering limitation:** browser storage quotas, ZIP32 limits and externally retained trajectories. Keep complete backups; browser storage alone is not a research archive.
 
 ## License
 
-SolvForge MD is free software licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE).
-
-Copyright © 2026 Yehosyua Widiatmo Wyldanta and contributors.
+Copyright © 2026 Yehosyua Widiatmo Wyldanta and contributors. Licensed under **GNU GPL version 3 only**. See [LICENSE](LICENSE). Third-party scientific programs and force-field distributions retain their own licenses.

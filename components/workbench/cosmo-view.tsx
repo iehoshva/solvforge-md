@@ -1,101 +1,53 @@
 "use client"
+import { uuid } from "@/lib/workbench/crypto"
 
-import { useMemo, useRef, useState } from "react"
-import { Download, FileUp } from "lucide-react"
+import { useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import type { CosmoRecord, ObservableRecord, ProjectState, ScientificState } from "@/lib/workbench/types"
-import { comparisonStatistics } from "@/lib/workbench/scientific"
-import { downloadJson, downloadText } from "@/lib/workbench/export"
-import { EmptyEvidence, formatNumber, InlineWarning, Metric, Section, StatusBadge, SvgPlot, ViewHeader } from "./shared"
-
-type ParsedCsv = { filename: string; headers: string[]; rows: string[][] }
-const canonicalFields = ["des", "hba", "hbd", "ratio", "solute", "temperature", "composition", "gamma", "gamma_infinity"] as const
-
-function parseCsv(text: string, filename: string): ParsedCsv {
-  const rows = text.split(/\r?\n/).filter((line) => line.trim()).map((line) => {
-    const values: string[] = []
-    let current = "", quoted = false
-    for (let i = 0; i < line.length; i++) {
-      const character = line[i]
-      if (character === '"' && line[i + 1] === '"' && quoted) { current += '"'; i++ }
-      else if (character === '"') quoted = !quoted
-      else if (character === "," && !quoted) { values.push(current.trim()); current = "" }
-      else current += character
-    }
-    values.push(current.trim())
-    return values
-  })
-  if (rows.length < 2) throw new Error("CSV requires a header and at least one data row.")
-  return { filename, headers: rows[0], rows: rows.slice(1) }
-}
-
-const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "")
-const numeric = (value: string | undefined) => value === undefined || value.trim() === "" || !Number.isFinite(Number(value)) ? null : Number(value)
-
-export function CosmoView({ project, scientific, setScientific }: { project: ProjectState; scientific: ScientificState; setScientific: (state: ScientificState) => void }) {
-  const cosmoRef = useRef<HTMLInputElement>(null)
-  const observableRef = useRef<HTMLInputElement>(null)
-  const [parsed, setParsed] = useState<ParsedCsv | null>(null)
-  const [mapping, setMapping] = useState<Record<string, string>>({})
-  const [temperatureUnit, setTemperatureUnit] = useState<"K" | "C">("K")
-  const [mode, setMode] = useState<"same-composition" | "infinite-dilution">("same-composition")
-  const [message, setMessage] = useState("")
-  const loadCosmo = async (file: File) => {
-    try {
-      const next = parseCsv(await file.text(), file.name)
-      setParsed(next)
-      const guessed: Record<string, string> = {}
-      canonicalFields.forEach((field) => { const found = next.headers.find((header) => normalize(header) === normalize(field) || (field === "temperature" && normalize(header).includes("temperature"))); if (found) guessed[field] = found })
-      setMapping(guessed)
-    } catch (error) { setMessage(error instanceof Error ? error.message : "CSV import failed.") }
-  }
-  const commit = () => {
-    if (!parsed || !mapping.des || !mapping.solute) return setMessage("Map at least DES and solute before import.")
-    const column = (row: string[], field: string) => row[parsed.headers.indexOf(mapping[field])]
-    const records: CosmoRecord[] = parsed.rows.map((row) => { const temperature = numeric(column(row, "temperature")); return ({ id: crypto.randomUUID(), des: column(row, "des") ?? "", hba: column(row, "hba") ?? "", hbd: column(row, "hbd") ?? "", ratio: column(row, "ratio") ?? "", solute: column(row, "solute") ?? "", temperatureK: temperature === null ? null : temperatureUnit === "C" ? temperature + 273.15 : temperature, composition: numeric(column(row, "composition")), gamma: numeric(column(row, "gamma")), gammaInfinity: numeric(column(row, "gamma_infinity")), metrics: Object.fromEntries(parsed.headers.map((header, i) => [header, numeric(row[i]) ?? row[i] ?? null])), sourceFilename: parsed.filename }) })
-    setScientific({ ...scientific, cosmoRecords: [...scientific.cosmoRecords, ...records] })
-    setParsed(null); setMessage(`${records.length} COSMO-RS row(s) imported with explicit column mapping.`)
-  }
-  const loadObservables = async (file: File) => {
-    try {
-      const table = parseCsv(await file.text(), file.name)
-      const index = (name: string) => table.headers.findIndex((header) => normalize(header) === normalize(name))
-      const records: ObservableRecord[] = table.rows.map((row) => ({ id: crypto.randomUUID(), runId: row[index("run_id")] ?? "", desId: row[index("des_id")] ?? "", soluteId: row[index("solute_id")] ?? "", temperatureK: numeric(row[index("temperature_k")]), soluteCount: numeric(row[index("solute_count")]), type: (row[index("type")] || "custom") as ObservableRecord["type"], value: Number(row[index("value")]), uncertainty: numeric(row[index("uncertainty")]), unit: row[index("unit")] ?? "", sourceFilename: file.name, notes: row[index("notes")] ?? "" })).filter((record) => Number.isFinite(record.value))
-      setScientific({ ...scientific, observables: [...scientific.observables, ...records] })
-      setMessage(`${records.length} observable row(s) imported. Values were associated by explicit run/system metadata.`)
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Observable import failed.") }
-  }
-  const comparisons = useMemo(() => {
-    const rows: Array<{ id: string; des: string; solute: string; temperature: number | null; composition: number | null; cosmo: number; md: number; residual: number; source: string }> = []
-    for (const record of scientific.cosmoRecords) {
-      const des = project.desSystems.find((item) => normalize(item.name) === normalize(record.des) || normalize(item.abbreviation) === normalize(record.des) || (record.hba && record.hbd && item.componentIds.map((id) => normalize(project.molecules.find((molecule) => molecule.id === id)?.fullName ?? "")).every((name) => [normalize(record.hba), normalize(record.hbd)].includes(name))))
-      const solute = project.molecules.find((item) => item.role === "solute" && (normalize(item.fullName) === normalize(record.solute) || normalize(item.abbreviation) === normalize(record.solute)))
-      if (!des || !solute) continue
-      const candidates = scientific.activityResults.filter((item) => item.desId === des.id && item.soluteId === solute.id && (record.temperatureK === null || Math.abs(item.temperatureK - record.temperatureK) < 0.02))
-      if (mode === "infinite-dilution") {
-        const md = candidates.find((item) => item.infiniteDilution)?.infiniteDilution?.gammaInfinity
-        if (record.gammaInfinity !== null && md !== undefined) rows.push({ id: record.id, des: des.name, solute: solute.fullName, temperature: record.temperatureK, composition: null, cosmo: record.gammaInfinity, md, residual: md - record.gammaInfinity, source: record.sourceFilename })
-      } else if (record.gamma !== null && record.composition !== null) {
-        for (const candidate of candidates) {
-          const point = candidate.points.filter((item) => item.gammaAbsolute !== null).sort((a, b) => Math.abs(a.x - record.composition!) - Math.abs(b.x - record.composition!))[0]
-          const tolerance = Math.max(1e-6, record.composition * 0.01)
-          if (point && Math.abs(point.x - record.composition) <= tolerance) rows.push({ id: record.id, des: des.name, solute: solute.fullName, temperature: record.temperatureK, composition: point.x, cosmo: record.gamma, md: point.gammaAbsolute!, residual: point.gammaAbsolute! - record.gamma, source: record.sourceFilename })
-        }
-      }
-    }
-    return rows
-  }, [scientific.cosmoRecords, scientific.activityResults, project, mode])
-  const stats = comparisons.length >= 2 ? comparisonStatistics(comparisons.map((row) => row.cosmo), comparisons.map((row) => row.md)) : null
-  const csv = ["des,solute,temperature_K,composition,cosmo_gamma,md_kbi_gamma,residual", ...comparisons.map((row) => [row.des, row.solute, row.temperature ?? "", row.composition ?? "", row.cosmo, row.md, row.residual].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))].join("\n")
-  return <>
-    <ViewHeader eyebrow="Cross-method validation" title="openCOSMO-RSpy ↔ MD/KBI" description="Import real COSMO-RS results, match by molecular metadata, and compare only scientifically compatible quantities." actions={<><Button variant="outline" size="sm" onClick={() => cosmoRef.current?.click()}><FileUp/>Import COSMO CSV</Button><input ref={cosmoRef} hidden type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && loadCosmo(event.target.files[0])}/><Button variant="outline" size="sm" onClick={() => observableRef.current?.click()}><FileUp/>Import observables</Button><input ref={observableRef} hidden type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && loadObservables(event.target.files[0])}/></>}/>
-    {parsed && <Section title="Map COSMO-RS columns" kicker={parsed.filename} actions={<Button onClick={commit}>Import mapped rows</Button>}><div className="form-grid form-grid-4">{canonicalFields.map((field) => <div className="field-stack" key={field}><Label>{field.replace("_", " ")}{["des", "solute"].includes(field) ? " · required" : ""}</Label><Select value={mapping[field] ?? "__none"} onValueChange={(value) => setMapping({ ...mapping, [field]: value === "__none" ? "" : value })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="__none">Not mapped</SelectItem>{parsed.headers.map((header) => <SelectItem key={header} value={header}>{header}</SelectItem>)}</SelectContent></Select></div>)}<div className="field-stack"><Label>Mapped temperature unit</Label><Select value={temperatureUnit} onValueChange={(value) => setTemperatureUnit(value as "K" | "C")}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="K">Kelvin</SelectItem><SelectItem value="C">Celsius</SelectItem></SelectContent></Select></div></div><p className="table-note">{parsed.rows.length} data row(s); {parsed.headers.length} source column(s). Composition is interpreted as mole fraction only when mapped; unmapped columns are retained in each record&apos;s metrics object.</p></Section>}
-    <Section title="Comparison domain" kicker="Compatibility gate"><div className="form-grid form-grid-2"><div className="field-stack"><Label>Mode</Label><Select value={mode} onValueChange={(value) => setMode(value as typeof mode)}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="same-composition">Same-composition γ(x)</SelectItem><SelectItem value="infinite-dilution">Infinite-dilution γ∞</SelectItem></SelectContent></Select></div><div className="readout-field"><Label>Compatible matched pairs</Label><strong>{comparisons.length}</strong></div></div>{mode === "same-composition" ? <InlineWarning title="Same-composition rule">Only absolute, anchored MD/KBI γ values within 1% relative composition tolerance are matched. Relative γ curves are excluded.</InlineWarning> : <InlineWarning title="Infinite-dilution rule">Only researcher-generated MD/KBI x→0 extrapolations are compared with COSMO-RS γ∞. The one-molecule box is never substituted.</InlineWarning>}{message && <p className="table-note">{message}</p>}</Section>
-    {stats ? <><div className="metrics-row"><Metric label="Pearson r" value={formatNumber(stats.pearson, 5)}/><Metric label="Spearman ρ" value={formatNumber(stats.spearman, 5)}/><Metric label="RMSE" value={formatNumber(stats.rmse)}/><Metric label="MAE" value={formatNumber(stats.mae)}/><Metric label="MAPE" value={stats.mape === null ? "undefined" : `${formatNumber(stats.mape, 3)}%`}/><Metric label="Ranking agreement" value={stats.rankingAgreement === null ? "insufficient" : `${formatNumber(100 * stats.rankingAgreement, 2)}%`} tone={stats.rankingAgreement !== null && stats.rankingAgreement >= 0.75 ? "good" : "warning"}/></div><div className="plot-grid"><Section title="Method comparison" kicker="Identity line reference"><SvgPlot x={comparisons.map((row) => row.cosmo)} y={comparisons.map((row) => row.md)} xLabel="COSMO-RS γ" yLabel="MD/KBI γ"/></Section><Section title="Residuals" kicker="MD/KBI − COSMO-RS"><SvgPlot x={comparisons.map((_, index) => index + 1)} y={comparisons.map((row) => row.residual)} xLabel="matched case" yLabel="residual"/></Section></div></> : <Section title="Cross-method statistics" kicker="Evidence required"><EmptyEvidence text="At least two compatible matched pairs are required for correlations and ranking statistics."/></Section>}
-    <Section title="Matched comparison table" kicker={`${comparisons.length} pair(s)`} actions={<><Button variant="outline" size="sm" disabled={!comparisons.length} onClick={() => downloadText("cosmo-md-comparison.csv", csv, "text/csv")}><Download/>CSV</Button><Button variant="outline" size="sm" disabled={!comparisons.length} onClick={() => downloadJson("cosmo-md-comparison.json", { mode, comparisons, statistics: stats })}><Download/>JSON</Button></>}>{comparisons.length ? <Table><TableHeader><TableRow><TableHead>DES / solute</TableHead><TableHead>T / K</TableHead><TableHead>x</TableHead><TableHead>COSMO-RS</TableHead><TableHead>MD/KBI</TableHead><TableHead>Residual</TableHead><TableHead>Rank relation</TableHead></TableRow></TableHeader><TableBody>{comparisons.sort((a, b) => a.cosmo - b.cosmo).map((row, index) => { const mdRank = [...comparisons].sort((a, b) => a.md - b.md).findIndex((item) => item.id === row.id) + 1; return <TableRow key={`${row.id}-${index}`}><TableCell><strong>{row.des}</strong><br/><small>{row.solute}</small></TableCell><TableCell>{row.temperature ?? "—"}</TableCell><TableCell>{row.composition?.toPrecision(6) ?? "∞ dilution"}</TableCell><TableCell>{formatNumber(row.cosmo)}</TableCell><TableCell>{formatNumber(row.md)}</TableCell><TableCell>{formatNumber(row.residual)}</TableCell><TableCell><StatusBadge tone={mdRank === index + 1 ? "good" : "warning"}>{mdRank === index + 1 ? "agrees" : `reversal: ${index + 1}→${mdRank}`}</StatusBadge></TableCell></TableRow> })}</TableBody></Table> : <EmptyEvidence text="No scientifically compatible COSMO-RS ↔ MD/KBI pairs are available."/>}</Section>
-    <Section title="Mechanistic observables" kicker={`${scientific.observables.length} imported values`}>{scientific.observables.length ? <Table><TableHeader><TableRow><TableHead>Run / system</TableHead><TableHead>Observable</TableHead><TableHead>Value</TableHead><TableHead>Uncertainty</TableHead><TableHead>Source</TableHead></TableRow></TableHeader><TableBody>{scientific.observables.map((record) => <TableRow key={record.id}><TableCell><code>{record.runId || `${record.desId}|${record.soluteId}`}</code></TableCell><TableCell>{record.type}</TableCell><TableCell>{formatNumber(record.value)} {record.unit}</TableCell><TableCell>{formatNumber(record.uncertainty)}</TableCell><TableCell>{record.sourceFilename}</TableCell></TableRow>)}</TableBody></Table> : <EmptyEvidence text="Import coordination, hydrogen-bond, diffusion, density, viscosity, or aggregation CSV values. Nothing is inferred from RDF unless explicitly calculated elsewhere."/>}</Section>
-  </>
+import type { CosmoRecord,ObservableRecord,ProjectState,ScientificState,RunRecord,RDFDataset } from "@/lib/workbench/types"
+import { parseTable,toCsv } from "@/lib/workbench/csv"
+import { sha256 } from "@/lib/workbench/identity"
+import { mapCosmoRecord,cosmoComparisons,comparisonSnapshot } from "@/lib/workbench/cosmo"
+import { SOFTWARE_VERSION } from "@/lib/workbench/version"
+import { downloadJson,downloadText } from "@/lib/workbench/export"
+import { Field,TextField,Section,ViewHeader,InlineWarning,SvgPlot,formatNumber } from "./shared"
+const fields=["des","hba","hbd","ratio","solute","temperature","pressure_bar","composition","gamma","gamma_infinity"]
+const num=(s:string|undefined)=>{if(s===undefined||s.trim()==="")return null;const n=Number(s);if(!Number.isFinite(n))throw new Error("Malformed numeric CSV value: "+s);return n}
+export function CosmoView({project,scientific,setScientific,runs,datasets}:{project:ProjectState;scientific:ScientificState;setScientific:(s:ScientificState)=>void;runs:RunRecord[];datasets:RDFDataset[]}){
+ const [raw,setRaw]=useState<{text:string;filename:string;rows:string[][]}|null>(null),[columns,setColumns]=useState<Record<string,string>>({}),[unit,setUnit]=useState(""),[mode,setMode]=useState<"same-composition"|"infinite-dilution">("same-composition"),[message,setMessage]=useState(""),[recordId,setRecordId]=useState(""),[desId,setDesId]=useState(""),[soluteId,setSoluteId]=useState(""),[rationale,setRationale]=useState(""),[review,setReview]=useState(false)
+ const act=async(fn:()=>void|Promise<void>)=>{try{await fn();setMessage("")}catch(e){setMessage(String(e))}}
+ const comparison=cosmoComparisons(scientific,runs,datasets,mode),record=scientific.cosmoRecords.find(r=>r.id===recordId)
+ const importRows=()=>act(async()=>{if(!raw||!unit)throw new Error("Explicit temperature units required.");const hash=await sha256(raw.text);if(scientific.cosmoRecords.some(r=>r.sourceHash===hash))throw new Error("Duplicate raw COSMO source.");
+ const read=(row:string[],f:string)=>row[Number(columns[f]??-1)]??""
+ const records=raw.rows.slice(1).map(row=>{const t=num(read(row,"temperature"));const c:CosmoRecord={id:uuid(),projectId:project.projectId,sourceFilename:raw.filename,sourceText:raw.text,sourceHash:hash,des:read(row,"des"),hba:read(row,"hba"),hbd:read(row,"hbd"),ratio:read(row,"ratio"),solute:read(row,"solute"),temperatureK:t===null?null:unit==="C"?t+273.15:t,pressureBar:num(read(row,"pressure_bar")),composition:num(read(row,"composition")),gamma:num(read(row,"gamma")),gammaInfinity:num(read(row,"gamma_infinity")),metrics:Object.fromEntries(raw.rows[0].map((h,i)=>[h,row[i]??""]))};return c})
+ setScientific({...scientific,cosmoRecords:[...scientific.cosmoRecords,...records]});setRaw(null)})
+ const importObservables=(file:File)=>act(async()=>{const text=await file.text(),hash=await sha256(text),rows=parseTable(text),headers=rows[0];if(scientific.observables.some(o=>o.sourceHash===hash))throw new Error("Duplicate observable source.");
+ const records=rows.slice(1).map(row=>{const get=(k:string)=>row[headers.indexOf(k)]??"",run=runs.find(r=>r.runId===get("run_id")&&r.projectId===project.projectId),value=num(get("value")),uncertainty=num(get("uncertainty")),type=get("type");
+ if(!run?.scientificState||value===null||!get("unit")||(uncertainty!==null&&uncertainty<0))throw new Error("Every observable requires a known run_id, finite value, explicit unit and nonnegative uncertainty.");
+ if(!["coordination","hbond_count","hbond_lifetime","diffusion","density","viscosity","aggregation","custom"].includes(type))throw new Error("Unknown observable type.");
+ return {id:uuid(),projectId:project.projectId,scientificState:run.scientificState,runId:run.runId,desId:run.desId,soluteId:run.soluteId,temperatureK:run.temperatureK,soluteCount:run.soluteCount,type:type as ObservableRecord["type"],value,uncertainty,unit:get("unit"),sourceFilename:file.name,sourceText:text,sourceHash:hash,notes:get("notes")}});
+ setScientific({...scientific,observables:[...scientific.observables,...records]})})
+ return <>
+ <ViewHeader eyebrow="Cross-method validation" title="openCOSMO-RSpy ↔ MD/KBI" description="Exact molecular ratio, temperature, pressure, composition and quantity; explicit standard-state review."/>
+ {message&&<div role="alert" className="inline-warning">{message}</div>}
+ <Section title="Import source CSV">
+ <label>COSMO-RS CSV<input aria-label="COSMO CSV" type="file" accept=".csv" onChange={e=>{const f=e.target.files?.[0];if(f)void act(async()=>{const text=await f.text(),rows=parseTable(text);if(rows.length<2)throw new Error("Header and data required.");setRaw({text,filename:f.name,rows});setColumns({})})}}/></label>
+ {raw&&<><div className="form-grid form-grid-4">{fields.map(f=><label key={f}>{f}<select aria-label={"COSMO column "+f} value={columns[f]??""} onChange={e=>setColumns({...columns,[f]:e.target.value})}><option value="">Unknown / unmapped</option>{raw.rows[0].map((h,i)=><option key={i} value={i}>{h}</option>)}</select></label>)}<label>Temperature unit<select aria-label="COSMO temperature unit" value={unit} onChange={e=>setUnit(e.target.value)}><option value="">Select units</option><option value="K">K</option><option value="C">°C</option></select></label></div><p>Composition means molecular solute mole fraction. Unmapped fields remain unknown; original rows are retained.</p><Button onClick={()=>void importRows()}>Import with column mapping</Button></>}
+ </Section>
+ <Section title="Explicit molecular mapping and compatibility review">
+ <label>Imported record<select aria-label="COSMO record" value={recordId} onChange={e=>setRecordId(e.target.value)}><option value="">Select record</option>{scientific.cosmoRecords.map(r=><option key={r.id} value={r.id}>{r.des} · {r.solute} · {r.ratio} · {r.temperatureK??"unknown"} K</option>)}</select></label>
+ {record&&<><div className="form-grid form-grid-3"><label>DES components in source ratio order<select aria-label="COSMO DES mapping" value={desId} onChange={e=>setDesId(e.target.value)}><option value="">Select molecular mapping</option>{project.desSystems.map(d=><option key={d.id} value={d.id}>{d.componentIds.map(id=>project.molecules.find(m=>m.id===id)?.fullName??id).join(" : ")}</option>)}</select></label><label>Solute identity<select aria-label="COSMO solute mapping" value={soluteId} onChange={e=>setSoluteId(e.target.value)}><option value="">Select solute</option>{project.soluteIds.map(id=><option key={id} value={id}>{project.molecules.find(m=>m.id===id)?.fullName}</option>)}</select></label><Field label="Source ratio (editable with rationale)" value={record.ratio} onChange={v=>setScientific({...scientific,cosmoRecords:scientific.cosmoRecords.map(r=>r.id===record.id?{...r,ratio:v,mapping:undefined,compatibilityReview:undefined}:r)})}/><Field label="Source temperature (K)" value={record.temperatureK??""} onChange={v=>setScientific({...scientific,cosmoRecords:scientific.cosmoRecords.map(r=>r.id===record.id?{...r,temperatureK:v===""?null:Number(v),compatibilityReview:undefined}:r)})}/><Field label="Source solute mole fraction" value={record.composition??""} onChange={v=>setScientific({...scientific,cosmoRecords:scientific.cosmoRecords.map(r=>r.id===record.id?{...r,composition:v===""?null:Number(v),compatibilityReview:undefined}:r)})}/><Field label="Source pressure (bar)" value={record.pressureBar??""} onChange={v=>setScientific({...scientific,cosmoRecords:scientific.cosmoRecords.map(r=>r.id===record.id?{...r,pressureBar:v===""?null:Number(v),compatibilityReview:undefined}:r)})}/></div>
+ <TextField label="Source mapping / standard-state / anchor independence rationale" value={rationale} onChange={setRationale}/>
+ <label className="flex gap-2 my-3"><input type="checkbox" checked={review} onChange={e=>setReview(e.target.checked)}/>I verified matching activity standard states and that the MD anchor does not use the COSMO result being validated.</label>
+ <Button onClick={()=>void act(()=>{const r=mapCosmoRecord(record,project,desId,soluteId,rationale);setScientific({...scientific,cosmoRecords:scientific.cosmoRecords.map(c=>c.id===r.id?{...r,compatibilityReview:{rationale,timestamp:new Date().toISOString(),standardStateCompatible:review,independentAnchor:review}}:c)})})}>Apply reviewed mapping</Button></>}
+ </Section>
+ <Section title="Exact comparison domain">
+ <label>Quantity<select aria-label="COSMO comparison quantity" value={mode} onChange={e=>setMode(e.target.value as typeof mode)}><option value="same-composition">γ(x) at the same sampled x</option><option value="infinite-dilution">Validated γ∞ extrapolation</option></select></label>
+ <InlineWarning title="No wildcard matching">Missing temperature, pressure, ratio or finite composition disables automatic matching. Different ratios remain different solvents. Relative activity coefficients cannot enter this comparison.</InlineWarning>
+ {comparison.diagnostics.map(d=><p key={d.cosmoId} className="text-xs">{d.cosmoId}: {d.reasons.join(" ")}</p>)}
+ {comparison.strata.map(g=><div key={g.id}><p className="text-xs break-all">{g.id}</p><SvgPlot x={g.rows.map(r=>r.cosmo)} y={g.rows.map(r=>r.md)} secondary={g.rows.map(r=>r.cosmo)} xLabel="COSMO γ" yLabel="MD/KBI γ; reference y=x"/><SvgPlot x={g.rows.map(r=>r.cosmo)} y={g.rows.map(r=>r.residual)} xLabel="COSMO γ" yLabel="MD − COSMO"/><pre className="text-xs">{JSON.stringify(g.statistics??"At least two matched cases in this exact comparison stratum required.",null,2)}</pre></div>)}
+ <table className="w-full text-sm"><thead><tr><th>DES</th><th>Solute</th><th>T / K</th><th>x</th><th>COSMO</th><th>MD/KBI</th><th>Residual</th></tr></thead><tbody>{comparison.rows.map(r=><tr key={r.id}><td>{r.des}</td><td>{r.solute}</td><td>{r.temperatureK}</td><td>{r.composition??"∞ dilution"}</td><td>{formatNumber(r.cosmo)}</td><td>{formatNumber(r.md)}</td><td>{formatNumber(r.residual)}</td></tr>)}</tbody></table>
+ <div className="section-actions"><Button onClick={()=>downloadJson("cosmo-comparison.json",comparison)}>Export matching, residuals and statistics</Button><Button variant="outline" onClick={()=>downloadText("cosmo-matching.csv",toCsv([["DES","solute","T_K","x","COSMO","MD","residual"],...comparison.rows.map(r=>[r.des,r.solute,r.temperatureK,r.composition??"",r.cosmo,r.md,r.residual])]),"text/csv")}>CSV</Button><Button variant="outline" disabled={!comparison.rows.length} onClick={()=>setScientific({...scientific,comparisons:[...(scientific.comparisons??[]),comparisonSnapshot(scientific,runs,datasets,mode)]})}>Store comparison snapshot</Button></div>
+ </Section>
+ <Section title="Mechanistic observables"><p>CSV columns: run_id, type, value, unit, uncertainty, notes. No rows are silently discarded.</p><input aria-label="Observables CSV" type="file" accept=".csv" onChange={e=>{const f=e.target.files?.[0];if(f)void importObservables(f)}}/>{scientific.observables.map(o=><p className="text-xs" key={o.id}>{o.runId}: {o.type} = {o.value} {o.unit} · {o.sourceFilename}</p>)}</Section>
+ </>
 }

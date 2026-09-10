@@ -1,0 +1,5 @@
+export const SOFTWARE_VERSION = "1.0.2"
+export const SCHEMA_VERSION = "2.0"
+export const FORCE_FIELD = "OPLS-AA"
+export const CHARGE_SOURCE = "Mulliken-derived charges from ORCA BP86/def2-TZVP"
+export const FORCE_FIELD_INCLUDE = "oplsaa.ff/forcefield.itp"

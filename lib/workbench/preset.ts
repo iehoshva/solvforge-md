@@ -1,7 +1,9 @@
+import { uuid } from "./crypto.ts"
 import type { BoxCompositionSettings, DESSystem, Molecule, ProjectState, Protocol } from "./types"
+import { SOFTWARE_VERSION, SCHEMA_VERSION } from "./version.ts"
 
 const now = () => new Date().toISOString()
-const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 9)}`
+const uid = (prefix: string) => `${prefix}-${uuid()}`
 export const defaultCompositionSettings = (): BoxCompositionSettings => ({ mode: "density", soluteMassMode: "include-in-target", lockAcrossSeries: false, lockReferenceSoluteCount: 1, densityResolution: "exact-only", densityInputUnit: "g/cm3", densityPoints: [], molecularWeightOverrides: {}, selectedMultipliers: {}, candidateSpan: 3, deviationWarningPct: 2 })
 
 export const thesisMolecules: Molecule[] = [
@@ -30,12 +32,13 @@ export const thesisProtocol: Protocol = {
   box: { x: 5, y: 5, z: 5, geometry: "cubic", unit: "nm" },
   replicas: 1,
   randomSeedBase: 42001,
-  em: { method: "steepest descent", maxSteps: 50000, fmax: 1000 },
+  em: { method: "steep", maxSteps: 50000, fmax: 1000 },
   nvt: { durationNs: 5, thermostat: "V-rescale", tauTPs: 0.1, timestepFs: 1 },
-  npt: { durationNs: 10, barostat: "Parrinello-Rahman", tauPPs: 2, timestepFs: 2 },
-  production: { pureDesNs: 100, soluteMinNs: 100, soluteMaxNs: 200, exactOrRange: "range", framePs: 20, timestepFs: 2 },
+  npt: { durationNs: 10, barostat: "Parrinello-Rahman", tauPPs: 2, timestepFs: 2, compressibilityBarInverse: null },
+  production: { pureDes: { enabled: false, durationNs: 100 }, solute: { mode: "convergence-controlled", initialNs: 100, maximumNs: 200, extensionNs: 20 }, framePs: 20, timestepFs: 2 },
   nonbonded: { cutoffNm: 1.2, coulombMethod: "PME", pmeOrder: 4, fourierSpacingNm: 0.12 },
-  constraints: "LINCS / appropriate constraints",
+  constraints: "h-bonds",
+  constraintAlgorithm: "lincs",
   equilibrationNotes: "Verify equilibration for each molecular system.",
   productionNotes: "Production duration is a plan; extend based on convergence evidence.",
   mdpOverrides: { em: "", nvt: "", npt: "", prod: "" },
@@ -43,8 +46,13 @@ export const thesisProtocol: Protocol = {
 
 export function createThesisProject(): ProjectState {
   return {
-    schemaVersion: "1.0",
-    softwareVersion: "1.0.0",
+    schemaVersion: SCHEMA_VERSION,
+    softwareVersion: SOFTWARE_VERSION,
+    createdWithVersion: SOFTWARE_VERSION,
+    originalSchemaVersion: SCHEMA_VERSION,
+    lastOpenedWithVersion: SOFTWARE_VERSION,
+    currentSchemaVersion: SCHEMA_VERSION,
+    migrationHistory: [],
     projectId: uid("project"),
     projectName: "Andaliman Selective Solvation MD/KBI",
     projectAbbreviation: "AND",
@@ -93,13 +101,21 @@ export function createCustomProject(): ProjectState {
 }
 
 export function migrateProject(input: ProjectState): ProjectState {
+  if (!input || !input.projectId || !Array.isArray(input.molecules) || !Array.isArray(input.desSystems)) throw new Error("Invalid project manifest: projectId, molecules and DES systems are required.")
   const defaults = createThesisProject()
+  const oldProduction = input.protocol?.production as Protocol["production"] & { pureDesNs?: number; soluteMinNs?: number; soluteMaxNs?: number; exactOrRange?: string }
+  const migrated = input.currentSchemaVersion !== SCHEMA_VERSION
   return {
     ...defaults,
     ...input,
-    schemaVersion: "1.0",
-    softwareVersion: "1.0.0",
-    defaultUnits: { ...defaults.defaultUnits, ...input.defaultUnits },
+    schemaVersion: SCHEMA_VERSION,
+    softwareVersion: input.softwareVersion ?? "unknown",
+    createdWithVersion: input.createdWithVersion ?? input.softwareVersion ?? "unknown",
+    originalSchemaVersion: input.originalSchemaVersion ?? input.schemaVersion ?? "unknown",
+    lastOpenedWithVersion: SOFTWARE_VERSION,
+    currentSchemaVersion: SCHEMA_VERSION,
+    migrationHistory: [...(input.migrationHistory ?? []), ...(migrated ? [{ from: input.currentSchemaVersion ?? input.schemaVersion ?? "unknown", to: SCHEMA_VERSION, at: now(), softwareVersion: SOFTWARE_VERSION, note: "Design defaults migrated. Historical evidence requires explicit project/state resolution; no missing scientific identity inferred." }] : [])],
+    defaultUnits: { ...defaults.defaultUnits },
     runNaming: { ...defaults.runNaming, ...input.runNaming },
     analysisDefaults: { ...defaults.analysisDefaults, ...input.analysisDefaults },
     desSystems: (input.desSystems ?? defaults.desSystems).map((system) => ({ ...system, compositionSettings: { ...defaultCompositionSettings(), ...system.compositionSettings, densityPoints: system.compositionSettings?.densityPoints ?? [], molecularWeightOverrides: system.compositionSettings?.molecularWeightOverrides ?? {}, selectedMultipliers: system.compositionSettings?.selectedMultipliers ?? {} } })),
@@ -107,10 +123,11 @@ export function migrateProject(input: ProjectState): ProjectState {
       ...defaults.protocol,
       ...input.protocol,
       box: { ...defaults.protocol.box, ...input.protocol?.box },
-      em: { ...defaults.protocol.em, ...input.protocol?.em },
+      em: { ...defaults.protocol.em, ...input.protocol?.em, method: String(input.protocol?.em?.method) === "steepest descent" ? "steep" : input.protocol?.em?.method ?? "steep" },
       nvt: { ...defaults.protocol.nvt, ...input.protocol?.nvt },
       npt: { ...defaults.protocol.npt, ...input.protocol?.npt },
-      production: { ...defaults.protocol.production, ...input.protocol?.production },
+      production: { framePs: oldProduction?.framePs ?? 20, timestepFs: oldProduction?.timestepFs ?? 2, pureDes: oldProduction?.pureDes ?? { enabled: false, durationNs: oldProduction?.pureDesNs ?? 100 }, solute: oldProduction?.solute ?? { mode: oldProduction?.exactOrRange === "exact" ? "fixed" : "convergence-controlled", initialNs: oldProduction?.soluteMinNs ?? 100, maximumNs: oldProduction?.soluteMaxNs ?? 200, extensionNs: 20 } },
+      constraints: String(input.protocol?.constraints) === "LINCS / appropriate constraints" ? "h-bonds" : input.protocol?.constraints ?? "h-bonds",
       nonbonded: { ...defaults.protocol.nonbonded, ...input.protocol?.nonbonded },
       mdpOverrides: { ...defaults.protocol.mdpOverrides!, ...input.protocol?.mdpOverrides },
     },

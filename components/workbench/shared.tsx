@@ -30,7 +30,7 @@ export function Section({ title, kicker, actions, children, className = "" }: { 
 export function Field({ label, value, onChange, type = "text", step, min, max, placeholder, note, disabled }: { label: string; value: string | number; onChange: (value: string) => void; type?: string; step?: string; min?: string | number; max?: string | number; placeholder?: string; note?: string; disabled?: boolean }) {
   return <div className="field-stack">
     <Label>{label}</Label>
-    <Input value={value} onChange={(e) => onChange(e.target.value)} type={type} step={step} min={min} max={max} placeholder={placeholder} disabled={disabled} />
+    <Input aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} type={type} step={step} min={min} max={max} placeholder={placeholder} disabled={disabled} />
     {note && <small>{note}</small>}
   </div>
 }
@@ -38,7 +38,7 @@ export function Field({ label, value, onChange, type = "text", step, min, max, p
 export function TextField({ label, value, onChange, placeholder, rows = 3, note }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string; rows?: number; note?: string }) {
   return <div className="field-stack">
     <Label>{label}</Label>
-    <Textarea value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows} />
+    <Textarea aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows} />
     {note && <small>{note}</small>}
   </div>
 }
@@ -65,15 +65,17 @@ export function formatNumber(value: number | null | undefined, digits = 4) {
 
 export function SvgPlot({ x, y, secondary, xLabel, yLabel, plateau, title, onSelectX }: { x: number[]; y: number[]; secondary?: number[]; xLabel: string; yLabel: string; plateau?: [number, number]; title?: string; onSelectX?: (value: number) => void }) {
   if (x.length < 2 || y.length < 2) return <div className="plot-empty">No plottable data</div>
+  if(x.length!==y.length||secondary&&secondary.length!==x.length||[...x,...y,...(secondary??[])].some(v=>!Number.isFinite(v))) return <div className="plot-empty">Plot unavailable: missing, non-finite or mismatched series values.</div>
   const w = 760, h = 300, m = { l: 58, r: 18, t: 24, b: 46 }
   const allY = secondary ? [...y, ...secondary] : y
-  const xmin = Math.min(...x), xmax = Math.max(...x), ymin = Math.min(...allY), ymax = Math.max(...allY)
+  const xmin = x.reduce((a, b) => Math.min(a, b), Infinity), xmax = x.reduce((a, b) => Math.max(a, b), -Infinity), ymin = allY.reduce((a, b) => Math.min(a, b), Infinity), ymax = allY.reduce((a, b) => Math.max(a, b), -Infinity)
   const sx = (v: number) => m.l + ((v - xmin) / (xmax - xmin || 1)) * (w - m.l - m.r)
   const sy = (v: number) => h - m.b - ((v - ymin) / (ymax - ymin || 1)) * (h - m.t - m.b)
   const path = (values: number[]) => values.map((v, i) => `${i ? "L" : "M"}${sx(x[i]).toFixed(1)},${sy(v).toFixed(1)}`).join(" ")
   const ticks = Array.from({ length: 5 }, (_, i) => i / 4)
   return <div className="plot-wrap">
     <svg viewBox={`0 0 ${w} ${h}`} role="img" aria-label={title ?? `${yLabel} against ${xLabel}`} className={onSelectX ? "plot-interactive" : undefined} onClick={onSelectX ? (event: MouseEvent<SVGSVGElement>) => { const bounds = event.currentTarget.getBoundingClientRect(); const pixel = (event.clientX - bounds.left) * w / bounds.width; const clamped = Math.max(m.l, Math.min(w - m.r, pixel)); onSelectX(xmin + (clamped - m.l) / (w - m.l - m.r) * (xmax - xmin)) } : undefined}>
+      <style>{`.grid-line{stroke:#d9dfdb;stroke-width:1}.axis-line{stroke:#6e7d73;stroke-width:1}.plot-line{fill:none;stroke:#286144;stroke-width:2}.plot-line-secondary{stroke:#a66e32;stroke-dasharray:5 3}.plateau-zone{fill:#d8eadb;opacity:.7}text{fill:#27362e;font:11px system-ui}.axis-label{font-size:12px}`}</style>
       {plateau && <rect x={sx(plateau[0])} y={m.t} width={Math.max(0, sx(plateau[1]) - sx(plateau[0]))} height={h - m.t - m.b} className="plateau-zone" />}
       {ticks.map((t) => <g key={`y${t}`}><line x1={m.l} x2={w - m.r} y1={m.t + t * (h - m.t - m.b)} y2={m.t + t * (h - m.t - m.b)} className="grid-line"/><text x={m.l - 8} y={m.t + t * (h - m.t - m.b) + 4} textAnchor="end">{(ymax - t * (ymax - ymin)).toPrecision(3)}</text></g>)}
       {ticks.map((t) => <text key={`x${t}`} x={m.l + t * (w - m.l - m.r)} y={h - 19} textAnchor="middle">{(xmin + t * (xmax - xmin)).toPrecision(3)}</text>)}

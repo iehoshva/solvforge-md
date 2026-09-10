@@ -1,14 +1,19 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Atom, BookOpenText, Boxes, Cable, ChartNoAxesCombined, CircleCheckBig, Database, FlaskConical, FolderKanban, Gauge, Grid3X3, Microscope, ScanSearch, Thermometer, Workflow } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarSeparator, SidebarTrigger } from "@/components/ui/sidebar"
 import type { ProjectState, RDFDataset, RunRecord, ScientificState } from "@/lib/workbench/types"
 import { createThesisProject, migrateProject } from "@/lib/workbench/preset"
-import { loadOrcaGromacsState, loadRdfDatasets, loadScientificState, saveOrcaGromacsState, saveRdfDatasets, saveScientificState } from "@/lib/workbench/storage"
-import { defaultScientificState } from "@/lib/workbench/scientific"
-import { defaultOrcaGromacsState, migrateOrcaGromacsState, type OrcaGromacsState } from "@/lib/workbench/orca-gromacs"
+import { loadOrcaGromacsState, loadRdfDatasets, loadScientificState } from "@/lib/workbench/storage"
+import { SOFTWARE_VERSION } from "@/lib/workbench/version"
+import { validateSourceIntegrity } from "@/lib/workbench/packages"
+import { clearPreparedExport } from "@/lib/workbench/export"
+import { provenanceGraph } from "@/lib/workbench/provenance"
+import { emptyWorkspace, importWorkspace, duplicateWorkspace, mergeRuns, scopeRecords, assertProjectOwnership, type ImportBundle, type Workspace } from "@/lib/workbench/workspace"
+import { loadWorkspace, saveWorkspace, listWorkspaces } from "@/lib/workbench/storage"
+import { type OrcaGromacsState } from "@/lib/workbench/orca-gromacs"
 import { ProjectView } from "./project-view"
 import { MoleculesView } from "./molecules-view"
 import { RunGeneratorView } from "./run-generator-view"
@@ -32,91 +37,97 @@ const navigation: Array<{ group: string; items: Array<{ id: ViewId; label: strin
 ]
 
 export default function Workbench() {
-  const [project, setProjectState] = useState<ProjectState>(() => createThesisProject())
-  const [customPresets, setCustomPresetsState] = useState<ProjectState[]>([])
-  const [datasets, setDatasetsState] = useState<RDFDataset[]>([])
-  const [activeRuns, setActiveRunsState] = useState<RunRecord[]>([])
-  const [scientific, setScientificState] = useState<ScientificState>(() => defaultScientificState())
-  const [orcaGromacs, setOrcaGromacsState] = useState<OrcaGromacsState>(() => defaultOrcaGromacsState())
+  const [workspace, setWorkspaceState] = useState<Workspace>(() => emptyWorkspace(createThesisProject()))
+  const latest = useRef(workspace)
+  const writes = useRef<Promise<void>>(Promise.resolve())
+  const [savedProjects, setSavedProjects] = useState<Array<{ projectId: string; projectName: string; savedAt: string }>>([])
+  const { project, customPresets, datasets, runs: activeRuns, scientific, orcaGromacs } = workspace
   const [view, setView] = useState<ViewId>("project")
   const [hydrated, setHydrated] = useState(false)
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved")
-
+  const [storageError, setStorageError] = useState("")
   useEffect(() => {
     let cancelled = false
-    Promise.resolve().then(async () => {
-      const storedProject = localStorage.getItem("gsmw.project")
-      const storedPresets = localStorage.getItem("gsmw.presets")
-      const storedRuns = localStorage.getItem("gsmw.runs")
-      const [loadedDatasets, loadedScientific, loadedOrca] = await Promise.all([loadRdfDatasets(), loadScientificState(), loadOrcaGromacsState()])
-      if (cancelled) return
-      if (storedProject) setProjectState(migrateProject(JSON.parse(storedProject)))
-      if (storedPresets) setCustomPresetsState(JSON.parse(storedPresets))
-      if (storedRuns) setActiveRunsState(JSON.parse(storedRuns))
-      setDatasetsState(loadedDatasets)
-      setScientificState(loadedScientific)
-      setOrcaGromacsState(loadedOrca)
-      setHydrated(true)
-    }).catch(() => {
-      if (!cancelled) {
-        setSaveState("error")
-        setHydrated(true)
+    void (async () => {
+      let next = await loadWorkspace()
+      if (!next) {
+        const old = localStorage.getItem("gsmw.project")
+        next = emptyWorkspace(old ? migrateProject(JSON.parse(old)) : createThesisProject())
+        const [rdf, science, orca] = await Promise.all([loadRdfDatasets(), loadScientificState(), loadOrcaGromacsState()])
+        const runs = localStorage.getItem("gsmw.runs")
+        if (old || runs || rdf.length || science.ssmPoints.length || Object.keys(orca.molecules).length) next.legacyEvidence = { reason: "Legacy global stores have unresolved project ownership. Kept outside the active scientific workspace.", project: old ? JSON.parse(old) : null, runs: runs ? JSON.parse(runs) : [], datasets: rdf, scientific: science, orcaGromacs: orca }
+        next.customPresets = JSON.parse(localStorage.getItem("gsmw.presets") ?? "[]")
+        await saveWorkspace(next)
       }
-    })
+      // Reopening updates migration/opening provenance, never the version of
+      // historical runs or scientific results. The full envelope stays intact.
+      next = importWorkspace(next)
+      await validateSourceIntegrity(next)
+      await saveWorkspace(next)
+      if (cancelled) return
+      latest.current = next; setWorkspaceState(next); setSavedProjects(await listWorkspaces()); setHydrated(true)
+    })().catch((e) => { if (!cancelled) { setStorageError(String(e)); setSaveState("error"); setHydrated(true) } })
     return () => { cancelled = true }
   }, [])
-
+  const commitWorkspace = (next: Workspace) => {
+    assertProjectOwnership(next, next.projectId)
+    clearPreparedExport()
+    next = { ...next, savedAt: new Date().toISOString(), savedWithVersion: SOFTWARE_VERSION }
+    next.provenance = provenanceGraph(next)
+    latest.current = next; setWorkspaceState(next); setSaveState("saving")
+    const revision = next.savedAt
+    writes.current = writes.current.catch(() => {}).then(() => saveWorkspace(next)).then(async () => {
+      if (latest.current.savedAt === revision) { setSaveState("saved"); setStorageError("") }
+      setSavedProjects(await listWorkspaces())
+    }).catch((e) => { setSaveState("error"); setStorageError(String(e)) })
+  }
   const setProject = (next: ProjectState) => {
-    setProjectState(next); setSaveState("saving")
-    try { localStorage.setItem("gsmw.project", JSON.stringify(next)); setSaveState("saved") } catch { setSaveState("error") }
+    const w = latest.current
+    if(next.projectId!==w.projectId){commitWorkspace({...emptyWorkspace(next),customPresets:w.customPresets});return}
+    const molecules={...w.orcaGromacs.molecules}
+    for(const m of next.molecules){const p=molecules[m.id];if(p&&(p.residueName!==m.residueName||p.expectedFormalCharge!==m.charge))molecules[m.id]={...p,residueName:m.residueName,expectedFormalCharge:m.charge,atoms:p.atoms.map(a=>({...a,residueName:m.residueName})),topologyReviewed:false,gromppValidated:false,chargeAcknowledged:false}}
+    commitWorkspace({...w,project:next,orcaGromacs:{...w.orcaGromacs,molecules}})
   }
-  const setCustomPresets = (next: ProjectState[]) => {
-    setCustomPresetsState(next); setSaveState("saving")
-    try { localStorage.setItem("gsmw.presets", JSON.stringify(next)); setSaveState("saved") } catch { setSaveState("error") }
-  }
+  const setCustomPresets = (next: ProjectState[]) => commitWorkspace({ ...latest.current, customPresets: next })
   const setActiveRuns = (next: RunRecord[]) => {
-    setActiveRunsState(next); setSaveState("saving")
-    try { localStorage.setItem("gsmw.runs", JSON.stringify(next)); setSaveState("saved") } catch { setSaveState("error") }
+    try { commitWorkspace({ ...latest.current, runs: mergeRuns(latest.current.runs, scopeRecords(next, latest.current.projectId)) }) }
+    catch (e) { alert(String(e)) }
   }
-  const setDatasets = (next: RDFDataset[]) => {
-    setDatasetsState(next); setSaveState("saving")
-    saveRdfDatasets(next).then(() => setSaveState("saved")).catch(() => setSaveState("error"))
-  }
-  const setScientific = (next: ScientificState) => {
-    setScientificState(next); setSaveState("saving")
-    saveScientificState(next).then(() => setSaveState("saved")).catch(() => setSaveState("error"))
-  }
+  const setDatasets = (next: RDFDataset[]) => commitWorkspace({ ...latest.current, datasets: scopeRecords(next, latest.current.projectId) })
+  const setScientific = (next: ScientificState) => commitWorkspace({ ...latest.current, scientific: { ...scopeRecords(next, latest.current.projectId), projectId: latest.current.projectId } })
   const setOrcaGromacs = (next: OrcaGromacsState) => {
-    setOrcaGromacsState(next); setSaveState("saving")
-    saveOrcaGromacsState(next).then(() => setSaveState("saved")).catch(() => setSaveState("error"))
+    const w=latest.current
+    const molecules=w.project.molecules.map(m=>next.molecules[m.id]?{...m,residueName:next.molecules[m.id].residueName,charge:next.molecules[m.id].expectedFormalCharge}:m)
+    commitWorkspace({...w,project:{...w.project,molecules},orcaGromacs:{...scopeRecords(next,w.projectId),projectId:w.projectId}})
   }
-  const importBundle = (bundle: { project: ProjectState; runs?: RunRecord[]; datasets?: RDFDataset[]; scientific?: ScientificState; customPresets?: ProjectState[]; orcaGromacs?: OrcaGromacsState }) => {
-    setProject(bundle.project)
-    if (bundle.runs) setActiveRuns(bundle.runs)
-    if (bundle.datasets) setDatasets(bundle.datasets)
-    if (bundle.scientific) setScientific(bundle.scientific)
-    if (bundle.customPresets) setCustomPresets(bundle.customPresets)
-    if (bundle.orcaGromacs) setOrcaGromacs(migrateOrcaGromacsState(bundle.orcaGromacs))
+  const importBundle = async (bundle: ImportBundle) => { const next=importWorkspace(bundle);await validateSourceIntegrity(next);commitWorkspace(next) }
+  const openProject = async (id: string) => {
+    await writes.current
+    const next = await loadWorkspace(id)
+    if (!next) throw new Error("Saved project unavailable.")
+    const restored = importWorkspace(next)
+    await validateSourceIntegrity(restored)
+    commitWorkspace(restored)
   }
 
   const champion = project.desSystems.find((d) => d.id === project.selectedChampion?.valueId)
   const optimum = project.concentrations.find((c) => c.id === project.selectedOptimum?.valueId)
   const render = () => {
     switch (view) {
-      case "project": return <ProjectView project={project} setProject={setProject} customPresets={customPresets} setCustomPresets={setCustomPresets} onImportBundle={importBundle}/>
+      case "project": return <ProjectView project={project} setProject={setProject} customPresets={customPresets} setCustomPresets={setCustomPresets} onImportBundle={importBundle} onDuplicate={(evidence) => commitWorkspace(duplicateWorkspace(latest.current, evidence))}/>
       case "molecules": return <MoleculesView project={project} setProject={setProject}/>
       case "runs": return <RunGeneratorView project={project} setProject={setProject} activeRuns={activeRuns} setActiveRuns={setActiveRuns}/>
-      case "orca": return <OrcaGromacsView project={project} runs={activeRuns} datasets={datasets} setDatasets={setDatasets} state={orcaGromacs} setState={setOrcaGromacs} openKbi={() => setView("kbi")}/>
-      case "kbi": return <KbiView project={project} setProject={setProject} datasets={datasets} setDatasets={setDatasets} scientific={scientific} setScientific={setScientific}/>
-      case "champion": return <ChampionView project={project} setProject={setProject} datasets={datasets} scientific={scientific}/>
-      case "concentration": return <ConcentrationView project={project} setProject={setProject} datasets={datasets} scientific={scientific}/>
-      case "temperature": return <TemperatureView project={project} datasets={datasets} scientific={scientific}/>
-      case "ssm": return <SsmView project={project} setProject={setProject} scientific={scientific} setScientific={setScientific}/>
-      case "matrix": return <ThermoView project={project} setProject={setProject} datasets={datasets} scientific={scientific} setScientific={setScientific}/>
-      case "cosmo": return <CosmoView project={project} scientific={scientific} setScientific={setScientific}/>
+      case "orca": return <OrcaGromacsView project={project} runs={activeRuns} datasets={datasets} setDatasets={setDatasets} state={orcaGromacs} setState={setOrcaGromacs} openKbi={() => setView("kbi")} openData={()=>setView("data")} openSsm={()=>setView("ssm")}/>
+      case "kbi": return <KbiView project={project} setProject={setProject} datasets={datasets} setDatasets={setDatasets} scientific={scientific} setScientific={setScientific} runs={activeRuns}/>
+      case "champion": return <ChampionView project={project} setProject={setProject} datasets={datasets} scientific={scientific} runs={activeRuns}/>
+      case "concentration": return <ConcentrationView project={project} setProject={setProject} datasets={datasets} scientific={scientific} runs={activeRuns}/>
+      case "temperature": return <TemperatureView project={project} datasets={datasets} scientific={scientific} runs={activeRuns}/>
+      case "ssm": return <SsmView project={project} setProject={setProject} scientific={scientific} setScientific={setScientific} runs={activeRuns} setRuns={setActiveRuns} datasets={datasets}/>
+      case "matrix": return <ThermoView project={project} setProject={setProject} datasets={datasets} scientific={scientific} setScientific={setScientific} runs={activeRuns}/>
+      case "cosmo": return <CosmoView project={project} scientific={scientific} setScientific={setScientific} runs={activeRuns} datasets={datasets}/>
       case "validation": return <ValidationView scientific={scientific} setScientific={setScientific}/>
       case "methods": return <MethodsView/>
-      case "data": return <DataView project={project} runs={activeRuns} datasets={datasets} customPresets={customPresets} scientific={scientific} orcaGromacs={orcaGromacs}/>
+      case "data": return <DataView workspace={workspace} onReplace={commitWorkspace}/>
     }
   }
 
@@ -127,11 +138,15 @@ export default function Workbench() {
       <SidebarHeader className="app-sidebar-header"><div className="app-mark"><Microscope/></div><div className="app-name"><strong>SolvForge</strong><span>MD</span></div></SidebarHeader>
       <SidebarSeparator/>
       <SidebarContent>{navigation.map((group) => <SidebarGroup key={group.group}><SidebarGroupLabel>{group.group}</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{group.items.map((item) => <SidebarMenuItem key={item.id}><SidebarMenuButton isActive={view === item.id} tooltip={item.label} onClick={() => setView(item.id)}><item.icon/><span>{item.label}</span>{item.id === "kbi" && datasets.length > 0 && <Badge variant="secondary" className="nav-count">{datasets.length}</Badge>}</SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup>)}</SidebarContent>
-      <SidebarFooter className="sidebar-foot"><div className={`save-indicator save-${saveState}`}><span/>{saveState === "saved" ? "LOCAL · SAVED" : saveState === "saving" ? "SAVING…" : "EXPORT BACKUP"}</div><small>v1.0.0 · no account</small></SidebarFooter>
+      <SidebarFooter className="sidebar-foot"><div className={`save-indicator save-${saveState}`}><span/>{saveState === "saved" ? "LOCAL · SAVED" : saveState === "saving" ? "SAVING…" : "EXPORT BACKUP"}</div><small>v{SOFTWARE_VERSION} · no account</small></SidebarFooter>
     </Sidebar>
     <SidebarInset className="workbench-shell">
-      <header className="workbench-topbar"><div className="topbar-left"><SidebarTrigger/><div><strong>{project.projectName}</strong><span>{project.presetName}</span></div></div><div className="workflow-rail"><button className={project.selectedChampion ? "done" : "active"} onClick={() => setView("champion")}><span>A</span><small>screen</small></button><i/><button className={project.selectedChampion ? (project.selectedOptimum ? "done" : "active") : "locked"} onClick={() => setView("concentration")}><span>B</span><small>{champion ? champion.abbreviation : "champion"}</small></button><i/><button className={project.selectedOptimum ? "active" : "locked"} onClick={() => setView("temperature")}><span>C</span><small>{optimum ? `N=${optimum.soluteCount}` : "optimum"}</small></button></div><div className="topbar-right"><Badge variant="outline">{project.mode === "thesis" ? "THESIS MODE" : "CUSTOM MODE"}</Badge><span>{hydrated ? "LOCAL-FIRST" : "LOADING"}</span></div></header>
-      <main className="workbench-main">{render()}</main>
+      <header className="workbench-topbar"><div className="topbar-left"><SidebarTrigger/><div><strong>{project.projectName}</strong><span>{project.presetName}</span></div></div><div className="workflow-rail"><button className={project.selectedChampion ? "done" : "active"} onClick={() => setView("champion")}><span>A</span><small>screen</small></button><i/><button className={project.selectedChampion ? (project.selectedOptimum ? "done" : "active") : "locked"} onClick={() => setView("concentration")}><span>B</span><small>{champion ? champion.abbreviation : "champion"}</small></button><i/><button className={project.selectedOptimum ? "active" : "locked"} onClick={() => setView("temperature")}><span>C</span><small>{optimum ? `N=${optimum.soluteCount}` : "optimum"}</small></button></div><div className="topbar-right"><Badge variant="outline">{project.mode === "thesis" ? "THESIS PRESET" : "CUSTOM PRESET"}</Badge><span>{hydrated ? "LOCAL-FIRST" : "LOADING"}</span></div></header>
+      <main className="workbench-main">
+        {storageError && <div role="alert" className="inline-warning">Local save failed: {storageError}. Export a complete archive before closing.</div>}
+        {view === "project" && <label className="field-stack mb-4">Open saved project<select aria-label="Open saved project" value={project.projectId} onChange={(e) => void openProject(e.target.value).catch((err) => alert(String(err)))}>{[{projectId:project.projectId,projectName:project.projectName},...savedProjects.filter(p=>p.projectId!==project.projectId)].map((p) => <option key={p.projectId} value={p.projectId}>{p.projectName}</option>)}</select></label>}
+        {workspace.legacyEvidence !== undefined && <div className="inline-warning">Legacy evidence is preserved separately with unresolved ownership. It cannot enter active scientific calculations. Export it from Data / Export.</div>}
+        <div key={project.projectId}>{render()}</div></main>
     </SidebarInset>
   </SidebarProvider>
 }

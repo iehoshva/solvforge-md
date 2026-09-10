@@ -1,0 +1,180 @@
+{
+  "recordedAt": "2026-09-10T04:28:12.478283+00:00",
+  "site": "SolvForge MD",
+  "softwareVersion": "1.0.2",
+  "environment": "Sites local preview; supported browser-client Tab API",
+  "fixture": "Synthetic software test only — not research data",
+  "results": [
+    {
+      "test": "Complete ZIP restores 18 raw RDF records",
+      "status": "PASS"
+    },
+    {
+      "test": "Strict KB gate and explicit override survive UI persistence",
+      "status": "PASS"
+    },
+    {
+      "test": "Pair/replica separation, block decisions and rejected-source propagation",
+      "status": "PASS"
+    },
+    {
+      "test": "New project isolation, reload and explicit reopen of previous evidence",
+      "status": "PASS"
+    },
+    {
+      "test": "Design-only import cannot inherit previous project evidence",
+      "status": "PASS"
+    },
+    {
+      "test": "Five visible numerical implementation tests",
+      "status": "PASS",
+      "detail": "Five PASS outcomes; nonzero absolute errors displayed in scientific notation (for example 2.598e-10), not rounded to zero."
+    },
+    {
+      "test": "Browser-generated complete JSON restores exact RDF datasets, scientific results and researcher decisions",
+      "status": "PASS",
+      "detail": "Restored through normal file chooser; raw/frozen-file integrity checked by importer. DOM snapshot normalizes whitespace, so byte-for-byte file equality is established by archive tests, not DOM text comparison."
+    },
+    {
+      "test": "23 editable protocol controls change actual MDPs; unsupported pipelines disabled",
+      "status": "PASS",
+      "controls": [
+        {
+          "control": "EM integrator",
+          "directive": "integrator",
+          "status": "PASS"
+        },
+        {
+          "control": "EM maximum steps",
+          "directive": "nsteps",
+          "status": "PASS"
+        },
+        {
+          "control": "Fmax target (kJ mol⁻¹ nm⁻¹)",
+          "directive": "emtol",
+          "status": "PASS"
+        },
+        {
+          "control": "NVT duration (ns)",
+          "directive": "nsteps",
+          "status": "PASS"
+        },
+        {
+          "control": "NVT timestep (fs)",
+          "directive": "dt",
+          "status": "PASS"
+        },
+        {
+          "control": "Thermostat",
+          "directive": "tcoupl",
+          "status": "PASS"
+        },
+        {
+          "control": "Temperature coupling τT (ps)",
+          "directive": "tau-t",
+          "status": "PASS"
+        },
+        {
+          "control": "NPT duration (ns)",
+          "directive": "nsteps",
+          "status": "PASS"
+        },
+        {
+          "control": "NPT timestep (fs)",
+          "directive": "dt",
+          "status": "PASS"
+        },
+        {
+          "control": "Barostat",
+          "directive": "pcoupl",
+          "status": "PASS"
+        },
+        {
+          "control": "Pressure coupling τP (ps)",
+          "directive": "tau-p",
+          "status": "PASS"
+        },
+        {
+          "control": "Compressibility (bar⁻¹)",
+          "directive": "compressibility",
+          "status": "PASS"
+        },
+        {
+          "control": "Initial production duration (ns)",
+          "directive": "nsteps",
+          "status": "PASS"
+        },
+        {
+          "control": "Production timestep (fs)",
+          "directive": "dt",
+          "status": "PASS"
+        },
+        {
+          "control": "Trajectory frame interval (ps)",
+          "directive": "nstxout-compressed",
+          "status": "PASS"
+        },
+        {
+          "control": "Nonbonded cutoff (nm)",
+          "directive": "rcoulomb",
+          "status": "PASS"
+        },
+        {
+          "control": "Coulomb method",
+          "directive": "coulombtype",
+          "status": "PASS"
+        },
+        {
+          "control": "PME order",
+          "directive": "pme-order",
+          "status": "PASS"
+        },
+        {
+          "control": "Fourier spacing (nm)",
+          "directive": "fourierspacing",
+          "status": "PASS"
+        },
+        {
+          "control": "Constraints",
+          "directive": "constraints",
+          "status": "PASS"
+        },
+        {
+          "control": "Constraint algorithm",
+          "directive": "constraint-algorithm",
+          "status": "PASS"
+        },
+        {
+          "control": "Pressure (bar)",
+          "directive": "ref-p",
+          "status": "PASS"
+        },
+        {
+          "control": "Random seed base",
+          "directive": "gen-seed",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "test": "Changing finite-size design invalidates stale generated systems",
+      "status": "PASS"
+    },
+    {
+      "test": "SSM rejects one size; three independently sourced sizes fit successfully after cross-engine length rounding fix",
+      "status": "PASS"
+    },
+    {
+      "test": "COSMO-RS 1:1 cannot match MD 5:1 after explicit source mapping",
+      "status": "PASS"
+    },
+    {
+      "test": "Matching 5:1, temperature, pressure and sampled composition enables actual COSMO/MD comparison",
+      "status": "PASS"
+    }
+  ],
+  "unverified": [
+    "Browser download transport did not yield a file in the preview harness. JSON review/copy and file import were tested; 1/10/50 MiB archive bytes are independently extracted and checked."
+  ],
+  "previousRecordedAt": "2026-09-09T13:08:19.102Z"
+}

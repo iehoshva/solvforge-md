@@ -40,7 +40,7 @@ export function BoxCompositionCalculator({ project, setProject, context = "syste
     const factor = unit === "angstrom" ? 10 : 0.1
     setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, x: project.protocol.box.x * factor, y: project.protocol.box.y * factor, z: project.protocol.box.z * factor, unit } } })
   }
-  const candidateKey = system ? compositionStateKey(temperatureK, soluteId, system.compositionSettings.lockAcrossSeries ? system.compositionSettings.lockReferenceSoluteCount : soluteCount) : ""
+  const candidateKey = system ? compositionStateKey(temperatureK, soluteId, system.compositionSettings.lockAcrossSeries ? system.compositionSettings.lockReferenceSoluteCount : soluteCount, project, system) : ""
   const selectCandidate = (multiplier: number) => {
     if (!system || !Number.isInteger(multiplier) || multiplier <= 0) return
     patchSettings({ selectedMultipliers: { ...system.compositionSettings.selectedMultipliers, [candidateKey]: multiplier } })
@@ -56,8 +56,8 @@ export function BoxCompositionCalculator({ project, setProject, context = "syste
       <div className="field-stack"><Label>Solvent system</Label><Select value={desId} onValueChange={setDesId}><SelectTrigger><SelectValue placeholder="Select system"/></SelectTrigger><SelectContent>{project.desSystems.map((item) => <SelectItem key={item.id} value={item.id}>{item.name} · {item.ratio.join(":")}</SelectItem>)}</SelectContent></Select></div>
       <div className="field-stack"><Label>Composition mode</Label><Select value={system?.compositionSettings.mode ?? "density"} onValueChange={(value) => patchSettings({ mode: value as "manual" | "density" })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="manual">A — Manual molecule counts</SelectItem><SelectItem value="density">B — Calculate from box + density</SelectItem></SelectContent></Select></div>
       <div className="field-stack"><Label>Solute</Label><Select value={soluteId} onValueChange={setSoluteId}><SelectTrigger><SelectValue placeholder="Select solute"/></SelectTrigger><SelectContent>{project.soluteIds.map((id) => <SelectItem key={id} value={id}>{project.molecules.find((item) => item.id === id)?.fullName}</SelectItem>)}</SelectContent></Select></div>
-      <Field label="Solute molecules" type="number" value={soluteCount} onChange={(value) => setSoluteCount(Number(value))}/>
-      <Field label="Simulation temperature (K)" type="number" step="0.01" value={temperatureK} onChange={(value) => setTemperatureK(Number(value))}/>
+      <Field label="Calculator preview solute molecules" type="number" value={soluteCount} onChange={(value) => setSoluteCount(Number(value))}/>
+      <Field label="Calculator preview temperature (K)" type="number" step="0.01" value={temperatureK} onChange={(value) => setTemperatureK(Number(value))}/>
       <Field label={`Box X (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`} type="number" step="0.1" value={project.protocol.box.x} onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, x: Number(value) } } })}/>
       <Field label={`Box Y (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`} type="number" step="0.1" value={project.protocol.box.y} onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, y: Number(value) } } })}/>
       <Field label={`Box Z (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`} type="number" step="0.1" value={project.protocol.box.z} onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, z: Number(value) } } })}/>

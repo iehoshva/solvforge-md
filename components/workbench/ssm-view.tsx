@@ -1,72 +1,49 @@
 "use client"
+import { uuid } from "@/lib/workbench/crypto"
 
-import { useMemo, useRef, useState } from "react"
-import { Check, Copy, Download, FileUp, Play } from "lucide-react"
+import { useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Textarea } from "@/components/ui/textarea"
-import type { ProjectState, ScientificState, SSMPoint } from "@/lib/workbench/types"
-import { fitSsm } from "@/lib/workbench/scientific"
-import { downloadJson, downloadText } from "@/lib/workbench/export"
-import { EmptyEvidence, Field, formatNumber, InlineWarning, Metric, Section, StatusBadge, SvgPlot, ViewHeader } from "./shared"
-
-export function SsmView({ project, setProject, scientific, setScientific }: { project: ProjectState; setProject: (project: ProjectState) => void; scientific: ScientificState; setScientific: (state: ScientificState) => void }) {
-  const [source, setSource] = useState("04_prod/prod.xtc")
-  const [topology, setTopology] = useState("04_prod/prod.tpr")
-  const [reference, setReference] = useState("<CENTRAL_REFERENCE_GROUP>")
-  const [target, setTarget] = useState("<TARGET_GROUP>")
-  const [pair, setPair] = useState("SOLUTE,THYMOL")
-  const [stateKey, setStateKey] = useState("stage-b|323.15K|N01")
-  const [sizes, setSizes] = useState("1.5, 2.0, 2.5, 3.0")
-  const [begin, setBegin] = useState("0")
-  const [end, setEnd] = useState("100000")
-  const [binWidth, setBinWidth] = useState("0.002")
-  const [rmax, setRmax] = useState("1.4")
-  const [prefix, setPrefix] = useState("ssm_rdf")
-  const [commands, setCommands] = useState("")
-  const [pointsText, setPointsText] = useState("# L_nm, Gv_nm3, uncertainty_nm3, replica\n")
-  const [representation, setRepresentation] = useState<"g-vs-inverse-l" | "lg-vs-l">("g-vs-inverse-l")
-  const [message, setMessage] = useState("")
-  const pointFileRef = useRef<HTMLInputElement>(null)
-  const generated = useMemo(() => sizes.split(/[,;\s]+/).filter(Boolean).map((size) => `# Effective SSM length: ${size} nm\n# Review the subvolume construction and normalization for the selected SSM method.\ngmx trjconv -f '${source}' -s '${topology}' -b ${begin} -e ${end} -center -pbc mol -o '${prefix}_L${size}.xtc'\ngmx rdf -f '${prefix}_L${size}.xtc' -s '${topology}' -ref '${reference}' -sel '${target}' -bin ${binWidth} -rmax ${rmax} -o '${prefix}_L${size}.xvg'`).join("\n\n"), [source, topology, reference, target, sizes, begin, end, prefix, binWidth, rmax])
-  const parsed = useMemo(() => pointsText.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith("#")).map((line) => line.split(/[,;\s]+/).map(Number)).filter((row) => row.length >= 2 && row.slice(0, 2).every(Number.isFinite)), [pointsText])
-  const pairNames = pair.split(/[,;]+/).map((value) => value.trim())
-  const candidatePoints: SSMPoint[] = parsed.map((row) => ({ id: `ssm-${crypto.randomUUID()}`, stateKey, desId: project.selectedChampion?.valueId ?? "", soluteId: project.soluteIds[0] ?? "", speciesA: pairNames[0] || "A", speciesB: pairNames[1] || "B", temperatureK: project.stageBTemperatureK, soluteCount: project.concentrations[0]?.soluteCount ?? 1, effectiveLengthNm: row[0], finiteKbiNm3: row[1], uncertaintyNm3: Number.isFinite(row[2]) && row[2] > 0 ? row[2] : null, replica: Number.isFinite(row[3]) ? row[3] : null, source: "manual finite-size table", accepted: true }))
-  const matchingPoints = scientific.ssmPoints.filter((point) => point.stateKey === stateKey && [point.speciesA, point.speciesB].sort().join("|") === [pairNames[0], pairNames[1]].sort().join("|"))
-  const latestFit = [...scientific.ssmFits].reverse().find((fit) => fit.stateKey === stateKey && fit.pairKey === [pairNames[0], pairNames[1]].sort().join("—"))
-  const savePoints = () => {
-    const retained = scientific.ssmPoints.filter((point) => !(point.stateKey === stateKey && [point.speciesA, point.speciesB].sort().join("|") === [pairNames[0], pairNames[1]].sort().join("|")))
-    setScientific({ ...scientific, ssmPoints: [...retained, ...candidatePoints] })
-    setMessage(`${candidatePoints.length} finite-size point(s) saved.`)
-  }
-  const runFit = () => {
-    try {
-      const sourcePoints = matchingPoints.length ? matchingPoints : candidatePoints
-      const fit = fitSsm(sourcePoints, representation, project.analysisDefaults.ssmMinimumPoints)
-      setScientific({ ...scientific, ssmPoints: matchingPoints.length ? scientific.ssmPoints : [...scientific.ssmPoints, ...candidatePoints], ssmFits: [...scientific.ssmFits, fit] })
-      setMessage("Regression completed. Inspect diagnostics before accepting G∞.")
-    } catch (error) { setMessage(error instanceof Error ? error.message : "SSM regression failed.") }
-  }
-  const saveCommands = () => setScientific({ ...scientific, commandProvenance: [...scientific.commandProvenance, { type: "ssm", settings: { source, topology, reference, target, pair, stateKey, sizes, begin, end, binWidth, rmax, prefix, commands: commands || generated }, timestamp: new Date().toISOString() }] })
+import type { ProjectState,RDFDataset,RunRecord,ScientificState,SSMFit } from "@/lib/workbench/types"
+import { designFiniteSizeRuns,finiteSizePreparationScript,fitValidatedSsm,pointFromDataset } from "@/lib/workbench/finite-size"
+import { canonical,stateId } from "@/lib/workbench/identity"
+import { SOFTWARE_VERSION } from "@/lib/workbench/version"
+import { downloadJson,downloadText } from "@/lib/workbench/export"
+import { Field,InlineWarning,Section,SvgPlot,TextField,ViewHeader,formatNumber } from "./shared"
+export function SsmView({project,setProject,scientific,setScientific,runs,setRuns,datasets}:{project:ProjectState;setProject:(p:ProjectState)=>void;scientific:ScientificState;setScientific:(s:ScientificState)=>void;runs:RunRecord[];setRuns:(r:RunRecord[])=>void;datasets:RDFDataset[]}) {
+  const [baseId,setBaseId]=useState(""),[sizes,setSizes]=useState("1,2,3"),[preview,setPreview]=useState<RunRecord[]>([]),[message,setMessage]=useState(""),[selected,setSelected]=useState<string[]>([]),[representation,setRepresentation]=useState<SSMFit["representation"]>("g-vs-inverse-l"),[rationale,setRationale]=useState(""),[fitId,setFitId]=useState("")
+  const base=runs.find(r=>r.runId===baseId),points=scientific.ssmPoints.filter(p=>selected.includes(p.id)),fit=scientific.ssmFits.find(f=>f.id===fitId)??scientific.ssmFits.at(-1)
+  const [previewSignature,setPreviewSignature]=useState("")
+  const designSignature=canonical({base,sizes,projectId:project.projectId})
+  const validPreview=previewSignature===designSignature?preview:[]
+  const act=(fn:()=>void)=>{try{fn();setMessage("")}catch(e){setMessage(String(e))}}
+  const add=(d:RDFDataset)=>act(()=>{if(scientific.ssmPoints.some(p=>p.datasetId===d.id&&p.analysisId===d.analysis?.id))throw new Error("This RDF analysis is already a finite-size point.");setScientific({...scientific,ssmPoints:[...scientific.ssmPoints,pointFromDataset(d,runs,datasets,scientific)]})})
   return <>
-    <ViewHeader eyebrow="Validation / finite size" title="Small System Method" description="Generate auditable preparation commands and extrapolate finite-volume KB integrals to the thermodynamic limit." actions={<><Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(commands || generated)}><Copy/>Copy commands</Button><Button variant="outline" size="sm" onClick={() => { saveCommands(); downloadText("ssm_commands.sh", commands || generated) }}><Download/>Download .sh</Button></>}/>
-    <Section title="SSM command assistant" kicker="Editable preparation script">
-      <div className="form-grid form-grid-4"><Field label="Source trajectory" value={source} onChange={setSource}/><Field label="Topology / TPR" value={topology} onChange={setTopology}/><Field label="Central reference group" value={reference} onChange={setReference}/><Field label="Target group" value={target} onChange={setTarget}/><Field label="Pair A, B" value={pair} onChange={setPair}/><Field label="State-point key" value={stateKey} onChange={setStateKey}/><Field label="Subvolume sizes (nm)" value={sizes} onChange={setSizes}/><Field label="Time interval (ps)" value={`${begin}, ${end}`} onChange={(value) => { const parts = value.split(/[,;]+/); setBegin(parts[0]?.trim() ?? ""); setEnd(parts[1]?.trim() ?? "") }}/><Field label="RDF bin width (nm)" value={binWidth} onChange={setBinWidth}/><Field label="Maximum RDF radius (nm)" value={rmax} onChange={setRmax}/><Field label="Output prefix" value={prefix} onChange={setPrefix}/></div>
-      <div className="code-editor"><div><span>COMMAND SCRIPT</span><Button variant="ghost" size="sm" onClick={() => setCommands(generated)}>Reset generated</Button></div><Textarea value={commands || generated} onChange={(event) => setCommands(event.target.value)} rows={14} spellCheck={false}/></div>
-      <InlineWarning title="Methodology boundary">The commands preserve settings but do not validate a particular subvolume estimator. Centering, boundary treatment, normalization, and selection semantics remain the researcher&apos;s responsibility.</InlineWarning>
+    <ViewHeader eyebrow="Finite-size validation" title="Independent systems → thermodynamic limit" description="Design genuinely different boxes, execute each externally, and fit only traceable, comparable molecular-pair evidence."/>
+    {message&&<div role="alert" className="inline-warning">{message}</div>}
+    <Section title="Finite-size run design">
+      <label className="field-stack">Resolved base run<select aria-label="Finite-size base run" value={baseId} onChange={e=>setBaseId(e.target.value)}><option value="">Select run</option>{runs.filter(r=>r.scientificState).map(r=><option key={r.runId} value={r.runId}>{r.runId}</option>)}</select></label>
+      <Field label="Integer population multipliers" value={sizes} onChange={setSizes} note="Counts scale by m; each dimension by m^(1/3). This preserves the molecular mole fractions and initial density."/>
+      <div className="section-actions"><Button disabled={!base} onClick={()=>act(()=>{if(base){setPreview(designFiniteSizeRuns(project,base,sizes.split(/[,;\s]+/).filter(Boolean).map(Number)));setPreviewSignature(designSignature)}} )}>Preview distinct systems</Button><Button variant="outline" disabled={!validPreview.length} onClick={()=>setRuns(validPreview)}>Add finite-size runs</Button><Button variant="outline" disabled={!validPreview.length} onClick={()=>downloadText("finite_size_runs.sh",finiteSizePreparationScript(validPreview))}>Download commands</Button></div>
+      {validPreview.map(r=><p key={r.runId} className="text-xs break-all">{r.runId}: box {r.scientificState?.boxDimensionsNm.map(v=>v.toPrecision(6)).join(" × ")} nm; {r.totalMoleculeCount} molecules; xsolute={r.moleFraction??"not applicable"}</p>)}
+      <InlineWarning title="External execution required">Pack and simulate each generated system independently. Changing an L label or cropping/reboxing the same trajectory is not accepted as finite-size evidence. Commands and settings refer to the generated run manifests.</InlineWarning>
     </Section>
-    <div className="plot-grid">
-      <Section title="Finite-size measurements" kicker={`${matchingPoints.length || candidatePoints.length} point(s)`} actions={<><Button variant="outline" size="sm" onClick={() => pointFileRef.current?.click()}><FileUp/>Import CSV</Button><input ref={pointFileRef} hidden type="file" accept=".csv,text/csv,text/plain" onChange={(event) => event.target.files?.[0] && event.target.files[0].text().then(setPointsText)}/><Button variant="outline" size="sm" onClick={savePoints}>Store points</Button></>}>
-        <Label>CSV or whitespace table</Label><Textarea value={pointsText} onChange={(event) => setPointsText(event.target.value)} rows={9} spellCheck={false}/><small>Columns: L (nm), Gᵛ(L) (nm³), optional uncertainty (nm³), optional replica.</small>
-        <div className="form-grid form-grid-2 mt-grid"><div className="field-stack"><Label>Regression representation</Label><Select value={representation} onValueChange={(value) => setRepresentation(value as typeof representation)}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="g-vs-inverse-l">Gᵛ versus 1/L</SelectItem><SelectItem value="lg-vs-l">L Gᵛ versus L</SelectItem></SelectContent></Select></div><Field label="Minimum accepted sizes" type="number" value={project.analysisDefaults.ssmMinimumPoints} onChange={(value) => setProject({ ...project, analysisDefaults: { ...project.analysisDefaults, ssmMinimumPoints: Math.max(2, Number(value)) } })}/></div>
-        <Button className="mt-grid" onClick={runFit}><Play/>Perform SSM regression</Button>{message && <p className="table-note">{message}</p>}
-      </Section>
-      <Section title="Thermodynamic-limit result" kicker="Gᵛ(L) = G∞ + F∞/L">
-        {latestFit ? <><div className="metrics-row"><Metric label="G∞" value={`${formatNumber(latestFit.gInfinityNm3)} nm³`} tone="accent"/><Metric label="95% CI" value={`${formatNumber(latestFit.gInfinityCi95[0])} … ${formatNumber(latestFit.gInfinityCi95[1])}`}/><Metric label="F∞" value={`${formatNumber(latestFit.fInfinityNm4)} nm⁴`}/><Metric label="R²" value={formatNumber(latestFit.r2, 5)} tone={latestFit.r2 >= 0.95 ? "good" : "warning"}/></div><SvgPlot x={(matchingPoints.length ? matchingPoints : candidatePoints).map((point) => representation === "g-vs-inverse-l" ? 1 / point.effectiveLengthNm : point.effectiveLengthNm)} y={(matchingPoints.length ? matchingPoints : candidatePoints).map((point) => representation === "g-vs-inverse-l" ? point.finiteKbiNm3 : point.effectiveLengthNm * point.finiteKbiNm3)} xLabel={representation === "g-vs-inverse-l" ? "1/L / nm⁻¹" : "L / nm"} yLabel={representation === "g-vs-inverse-l" ? "Gᵛ / nm³" : "L Gᵛ / nm⁴"}/><div className="metrics-row"><Metric label="Max |residual|" value={formatNumber(Math.max(...latestFit.residuals.map(Math.abs)))}/><Metric label="Max leverage" value={formatNumber(Math.max(...latestFit.leverage), 4)}/><Metric label="Accepted" value={latestFit.accepted ? "yes" : "researcher review"} tone={latestFit.accepted ? "good" : "warning"}/></div><Button variant={latestFit.accepted ? "outline" : "default"} onClick={() => setScientific({ ...scientific, ssmFits: scientific.ssmFits.map((fit) => fit.id === latestFit.id ? { ...fit, accepted: !fit.accepted } : fit) })}>{latestFit.accepted ? "Reopen fit" : <><Check/>Accept G∞</>}</Button><Button variant="outline" className="ml-grid" onClick={() => downloadJson("ssm-fit.json", latestFit)}>Export fit</Button></> : <EmptyEvidence text={`Insufficient finite-size data for thermodynamic-limit extrapolation. Provide at least ${project.analysisDefaults.ssmMinimumPoints} accepted, distinct L values.`}/>} 
-      </Section>
-    </div>
-    {scientific.ssmFits.length > 0 && <Section title="Stored SSM fits" kicker="Provenance"><Table><TableHeader><TableRow><TableHead>State / pair</TableHead><TableHead>Representation</TableHead><TableHead>G∞ / nm³</TableHead><TableHead>F∞ / nm⁴</TableHead><TableHead>R²</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{scientific.ssmFits.map((fit) => <TableRow key={fit.id}><TableCell><code>{fit.stateKey}</code><br/><small>{fit.pairKey}</small></TableCell><TableCell>{fit.representation}</TableCell><TableCell>{formatNumber(fit.gInfinityNm3)}</TableCell><TableCell>{formatNumber(fit.fInfinityNm4)}</TableCell><TableCell>{formatNumber(fit.r2, 5)}</TableCell><TableCell><StatusBadge tone={fit.accepted ? "good" : "warning"}>{fit.accepted ? "accepted" : "candidate"}</StatusBadge></TableCell></TableRow>)}</TableBody></Table></Section>}
+    <Section title="Link finite-size measurements" kicker="No manually invented system sizes">
+      <p className="table-note">L = cube root of the reported equilibrated mean volume. Each source requires an accepted plateau, current accepted time-convergence windows, molecular COM selections and actual trajectory provenance.</p>
+      {datasets.filter(d=>d.analysis).map(d=><div key={d.id} className="flex gap-3 items-center border-b py-2"><span className="grow">{d.sourceFilename} · {d.observable?.speciesA??"?"} ↔ {d.observable?.speciesB??"?"}</span><Button size="sm" variant="outline" onClick={()=>add(d)}>Add linked measurement</Button></div>)}
+      {!datasets.some(d=>d.analysis)&&<p>No analyzed RDF sources available.</p>}
+      <table className="w-full text-sm mt-3"><thead><tr><th>Include</th><th>Source / run</th><th>L / nm</th><th>G(L) / nm³</th><th>Replica</th><th>Uncertainty</th></tr></thead><tbody>{scientific.ssmPoints.map(p=><tr key={p.id}><td><input aria-label={"Include finite-size point "+p.id} type="checkbox" checked={selected.includes(p.id)} onChange={e=>setSelected(e.target.checked?[...selected,p.id]:selected.filter(id=>id!==p.id))}/></td><td className="break-all">{p.source}<br/>{p.runId??"unresolved legacy"}</td><td>{formatNumber(p.effectiveLengthNm)}</td><td>{formatNumber(p.finiteKbiNm3)}</td><td>{p.replica}</td><td>{p.uncertaintyKind??"legacy / unknown"}</td></tr>)}</tbody></table>
+    </Section>
+    <Section title="Finite-size scaling model">
+      <InlineWarning title="Model assumption requiring researcher review">This fit extrapolates independently simulated finite-box running KBIs using G(L)=G∞+F∞/L. It is a selected box-size scaling model, not an automatically validated open-subvolume SSM estimator. Inspect ensemble effects, fit range and residuals before acceptance.</InlineWarning>
+      <div className="form-grid form-grid-2"><label className="field-stack">Regression representation<select aria-label="Regression representation" value={representation} onChange={e=>setRepresentation(e.target.value as typeof representation)}><option value="g-vs-inverse-l">G versus 1/L</option><option value="lg-vs-l">L G versus L (transformed weights)</option></select></label><Field label="Minimum distinct sizes" type="number" min={3} value={project.analysisDefaults.ssmMinimumPoints} onChange={v=>setProject({...project,analysisDefaults:{...project.analysisDefaults,ssmMinimumPoints:Number(v)}})}/></div>
+      <Button disabled={!points.length} onClick={()=>act(()=>{const f=fitValidatedSsm(points,representation,project.analysisDefaults.ssmMinimumPoints,runs,datasets,scientific);setScientific({...scientific,ssmFits:[...scientific.ssmFits,f]});setFitId(f.id)})}>Fit selected measurements</Button>
+      {fit&&<><label className="field-stack mt-3">Stored fit<select aria-label="Stored SSM fit" value={fit.id} onChange={e=>setFitId(e.target.value)}>{scientific.ssmFits.map(f=><option value={f.id} key={f.id}>{f.id} · {f.pairKey}</option>)}</select></label><p>G∞={formatNumber(fit.gInfinityNm3)} nm³; SE={formatNumber(fit.gInfinitySe)}; 95% CI {fit.gInfinityCi95.map(v=>formatNumber(v)).join(" … ")}. F∞={formatNumber(fit.fInfinityNm4)} nm⁴; R²={formatNumber(fit.r2)}.</p>
+        <SvgPlot x={fit.pointIds.map(id=>scientific.ssmPoints.find(p=>p.id===id)).filter(p=>!!p).map(p=>1/p.effectiveLengthNm)} y={fit.pointIds.map(id=>scientific.ssmPoints.find(p=>p.id===id)).filter(p=>!!p).map(p=>p.finiteKbiNm3)} xLabel="1/L / nm⁻¹" yLabel="G(L) / nm³"/>
+        {fit.fitInputs&&<><SvgPlot x={fit.fitInputs.aggregatedPoints.map(p=>1/p.effectiveLengthNm)} y={fit.fitInputs.aggregatedPoints.map(p=>p.finiteKbiNm3)} secondary={fit.fitInputs.aggregatedPoints.map(p=>fit.gInfinityNm3+fit.fInfinityNm4/p.effectiveLengthNm)} xLabel="1/L / nm⁻¹" yLabel="Replica-aggregated G(L); dashed fit / nm³"/><SvgPlot x={fit.fitInputs.aggregatedPoints.map(p=>fit.representation==="g-vs-inverse-l"?1/p.effectiveLengthNm:p.effectiveLengthNm)} y={fit.residuals} xLabel={fit.representation==="g-vs-inverse-l"?"1/L / nm⁻¹":"L / nm"} yLabel={fit.representation==="g-vs-inverse-l"?"Regression residual / nm³":"Regression residual / nm⁴"}/></>}
+        <details><summary>Fit diagnostics and parents</summary><pre className="text-xs overflow-auto">{JSON.stringify(fit,null,2)}</pre></details>
+        <TextField label="Finite-size model acceptance rationale" value={rationale} onChange={setRationale}/>
+        <div className="section-actions"><Button disabled={!rationale.trim()} onClick={()=>act(()=>{const ps=fit.pointIds.map(id=>scientific.ssmPoints.find(p=>p.id===id)!);fitValidatedSsm(ps,fit.representation,project.analysisDefaults.ssmMinimumPoints,runs,datasets,scientific);setScientific({...scientific,ssmFits:scientific.ssmFits.map(f=>f.id===fit.id?{...f,accepted:true,decisionHistory:[...(f.decisionHistory??[]),...(f.decision?[f.decision]:[])],decision:{id:uuid(),projectId:project.projectId,stateId:stateId(ps[0].scientificState,{finiteSizeFamily:true})!,sourceIds:fit.pointIds,classification:"accepted",rationale,timestamp:new Date().toISOString(),softwareVersion:SOFTWARE_VERSION,actor:"researcher"}}:f)})})}>Accept extrapolation</Button><Button variant="outline" disabled={!rationale.trim()} onClick={()=>act(()=>setScientific({...scientific,ssmFits:scientific.ssmFits.map(f=>f.id===fit.id?{...f,accepted:false,decisionHistory:[...(f.decisionHistory??[]),...(f.decision?[f.decision]:[])],decision:{id:uuid(),projectId:project.projectId,stateId:fit.familyId!,sourceIds:fit.pointIds,classification:"rejected",rationale,timestamp:new Date().toISOString(),softwareVersion:SOFTWARE_VERSION,actor:"researcher"}}:f)}))}>Reject fit</Button><Button variant="outline" onClick={()=>downloadJson("ssm-results.json",{points:scientific.ssmPoints,fits:scientific.ssmFits})}>Export all intermediates</Button></div>
+      </>}
+    </Section>
   </>
 }

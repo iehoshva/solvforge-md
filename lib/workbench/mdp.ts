@@ -1,4 +1,5 @@
 import type { RunRecord } from "./types"
+import { parseDirectives, validateStage } from "./protocol.ts"
 
 export type MdpDiagnostic = { severity: "ERROR" | "WARNING" | "INFO"; code: string; message: string; line?: number }
 
@@ -18,7 +19,8 @@ export function parseMdp(text: string) {
 const numeric = new Set(["dt", "nsteps", "emtol", "nstxout", "nstxout_compressed", "nstenergy", "nstlog", "ref_t", "ref_p", "tau_t", "tau_p", "rcoulomb", "rvdw", "fourierspacing", "pme_order"])
 
 export function validateMdp(text: string, kind: "em" | "nvt" | "npt" | "prod", expected?: { temperatureK?: number; pressureBar?: number; durationNs?: number }) {
-  const diagnostics: MdpDiagnostic[] = []
+  const parsed = parseDirectives(text)
+  const diagnostics: MdpDiagnostic[] = [...parsed.diagnostics, ...validateStage(parsed.directives, kind, expected)]
   const directives = parseMdp(text)
   for (const [key, entries] of directives) if (entries.length > 1) diagnostics.push({ severity: "ERROR", code: "DUPLICATE_DIRECTIVE", message: `Directive '${key}' occurs ${entries.length} times.`, line: entries[1].line })
   const first = (key: string) => directives.get(key)?.[0]

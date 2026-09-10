@@ -1,3 +1,4 @@
+import { canonical } from "./identity.ts"
 import type { CompositionCalculationMetadata, CompositionDiagnostic, DESSystem, DensityPoint, Molecule, ProjectState } from "./types"
 
 export const AVOGADRO = 6.02214076e23
@@ -56,8 +57,8 @@ export function boxVolumeNm3(box: ProjectState["protocol"]["box"]) {
   return dimensions.x * dimensions.y * dimensions.z
 }
 
-export function compositionStateKey(temperatureK: number, soluteId: string, soluteCount: number) {
-  return `${Number(temperatureK).toFixed(4)}|${soluteId}|${Math.trunc(soluteCount)}`
+export function compositionStateKey(temperatureK:number,soluteId:string,soluteCount:number,project?:ProjectState,system?:DESSystem){
+ return canonical({temperatureK,soluteId,soluteCount,box:project?.protocol.box,components:system?.componentIds,ratio:system?.ratio,molecularWeights:project?.molecules.map(m=>({id:m.id,mw:m.molecularWeight})),settings:system?{...system.compositionSettings,selectedMultipliers:undefined}:undefined})
 }
 
 export function resolveDensity(system: DESSystem, temperatureK: number): DensityResolution | null {
@@ -111,23 +112,23 @@ export function resolveDensity(system: DESSystem, temperatureK: number): Density
 function molecularWeight(system: DESSystem, molecule: Molecule | undefined) {
   if (!molecule) return null
   const override = system.compositionSettings.molecularWeightOverrides[molecule.id]
-  return positiveFinite(override) ? override : positiveFinite(molecule.molecularWeight) ? molecule.molecularWeight : null
+  return override !== undefined ? (positiveFinite(override) ? override : null) : positiveFinite(molecule.molecularWeight) ? molecule.molecularWeight : null
 }
 
-function buildMetadata(input: { project: ProjectState; system: DESSystem; solute: Molecule; soluteCount: number; componentCounts: number[]; molecularWeights: Record<string, number>; density: DensityResolution | null; multiplier: number | null; diagnostics: CompositionDiagnostic[] }): CompositionCalculationMetadata | null {
+function buildMetadata(input: { project: ProjectState; system: DESSystem; solute: Molecule | undefined; soluteCount: number; componentCounts: number[]; molecularWeights: Record<string, number>; density: DensityResolution | null; multiplier: number | null; diagnostics: CompositionDiagnostic[] }): CompositionCalculationMetadata | null {
   const { project, system, solute, soluteCount, componentCounts, molecularWeights, density, multiplier, diagnostics } = input
   const volume = boxVolumeNm3(project.protocol.box)
   if (!(volume > 0)) return null
   const componentMasses = system.componentIds.map((id, index) => componentCounts[index] * (molecularWeights[id] ?? 0) / AVOGADRO)
-  const soluteMass = soluteCount * (molecularWeights[solute.id] ?? 0) / AVOGADRO
+  const soluteMass = solute ? soluteCount * (molecularWeights[solute.id] ?? 0) / AVOGADRO : 0
   const desOnlyMassG = componentMasses.reduce((sum, value) => sum + value, 0)
   const totalMassG = desOnlyMassG + soluteMass
   const counts: Record<string, number> = Object.fromEntries(system.componentIds.map((id, index) => [id, componentCounts[index]]))
-  counts[solute.id] = soluteCount
+  if (solute) counts[solute.id] = soluteCount
   const totalCount = Object.values(counts).reduce((sum, value) => sum + value, 0)
   const desCount = componentCounts.reduce((sum, value) => sum + value, 0)
   const masses: Record<string, number> = Object.fromEntries(system.componentIds.map((id, index) => [id, componentMasses[index]]))
-  masses[solute.id] = soluteMass
+  if (solute) masses[solute.id] = soluteMass
   const moleFractions = Object.fromEntries(Object.entries(counts).map(([id, count]) => [id, totalCount > 0 ? count / totalCount : 0]))
   const desNormalizedMoleFractions = Object.fromEntries(system.componentIds.map((id, index) => [id, desCount > 0 ? componentCounts[index] / desCount : 0]))
   const massFractions = Object.fromEntries(Object.entries(masses).map(([id, mass]) => [id, totalMassG > 0 ? mass / totalMassG : 0]))
@@ -144,9 +145,9 @@ export function calculateBoxComposition(project: ProjectState, desId: string, so
   const system = project.desSystems.find((item) => item.id === desId)
   const solute = project.molecules.find((item) => item.id === soluteId)
   if (!system) return { diagnostics: [diagnostic("ERROR", "SYSTEM_MISSING", "Selected solvent system is unavailable.")], candidates: [], selected: null, componentCounts: null, density: null, molecularWeights: {}, metadata: null }
-  if (!solute) return { diagnostics: [diagnostic("ERROR", "SOLUTE_MISSING", "Selected solute is unavailable.")], candidates: [], selected: null, componentCounts: null, density: null, molecularWeights: {}, metadata: null }
+  if (!solute && (soluteId || soluteCount !== 0)) return { diagnostics: [diagnostic("ERROR", "SOLUTE_MISSING", "Selected solute is unavailable.")], candidates: [], selected: null, componentCounts: null, density: null, molecularWeights: {}, metadata: null }
   const geometry = project.protocol.box.geometry.trim().toLowerCase()
-  if (!geometry.includes("cubic") && !geometry.includes("orthorhombic") && !geometry.includes("rectangular")) diagnostics.push(diagnostic("ERROR", "UNSUPPORTED_GEOMETRY", `Volume calculation is not defined for box geometry '${project.protocol.box.geometry}'. Use cubic or orthorhombic dimensions.`))
+  if (!["cubic", "orthorhombic", "rectangular"].includes(geometry)) diagnostics.push(diagnostic("ERROR", "UNSUPPORTED_GEOMETRY", `Volume calculation is not defined for box geometry '${project.protocol.box.geometry}'. Use cubic or orthorhombic dimensions.`))
   const dimensions = boxDimensionsNm(project.protocol.box)
   if (![dimensions.x, dimensions.y, dimensions.z].every(positiveFinite)) diagnostics.push(diagnostic("ERROR", "INVALID_BOX", "Every box dimension must be greater than zero."))
   if (geometry.includes("cubic") && Math.max(dimensions.x, dimensions.y, dimensions.z) - Math.min(dimensions.x, dimensions.y, dimensions.z) > 1e-9) diagnostics.push(diagnostic("WARNING", "CUBIC_DIMENSION_MISMATCH", "Box geometry is labeled cubic but X, Y, and Z differ; volume is calculated from the entered dimensions."))
@@ -154,7 +155,7 @@ export function calculateBoxComposition(project: ProjectState, desId: string, so
   if (!system.componentIds.length || system.ratio.length !== system.componentIds.length || system.ratio.some((value) => !Number.isInteger(value) || value <= 0)) diagnostics.push(diagnostic("ERROR", "INVALID_RATIO", "Every solvent component requires a positive integer ratio coefficient."))
   if (new Set(system.componentIds).size !== system.componentIds.length) diagnostics.push(diagnostic("ERROR", "DUPLICATE_COMPONENT", "Each molecular species may appear only once in a solvent-system composition."))
   if (system.componentIds.includes(soluteId)) diagnostics.push(diagnostic("ERROR", "SOLUTE_IS_SOLVENT_COMPONENT", "The selected solute is also listed as a solvent component; choose distinct molecular species."))
-  if (!Number.isInteger(system.compositionSettings.candidateSpan) || system.compositionSettings.candidateSpan < 1) diagnostics.push(diagnostic("ERROR", "INVALID_CANDIDATE_SPAN", "Nearby-candidate span must be a positive integer."))
+  if (!Number.isInteger(system.compositionSettings.candidateSpan) || system.compositionSettings.candidateSpan < 1 || system.compositionSettings.candidateSpan > 200) diagnostics.push(diagnostic("ERROR", "INVALID_CANDIDATE_SPAN", "Nearby-candidate span must be an integer from 1 to 200."))
   if (!positiveFinite(system.compositionSettings.deviationWarningPct)) diagnostics.push(diagnostic("ERROR", "INVALID_DEVIATION_THRESHOLD", "Density-deviation warning threshold must be greater than zero."))
   const molecules = system.componentIds.map((id) => project.molecules.find((item) => item.id === id))
   const molecularWeights: Record<string, number> = {}
@@ -164,8 +165,8 @@ export function calculateBoxComposition(project: ProjectState, desId: string, so
     else molecularWeights[system.componentIds[index]] = value
   })
   const soluteMw = molecularWeight(system, solute)
-  if (!soluteMw) diagnostics.push(diagnostic("ERROR", "MISSING_SOLUTE_MW", `Molecular weight is required for solute ${solute.fullName}.`))
-  else molecularWeights[solute.id] = soluteMw
+  if (solute && !soluteMw) diagnostics.push(diagnostic("ERROR", "MISSING_SOLUTE_MW", `Valid molecular weight is required for solute ${solute.fullName}; invalid overrides are not ignored.`))
+  else if (solute && soluteMw) molecularWeights[solute.id] = soluteMw
   const density = resolveDensity(system, temperatureK)
   if (system.compositionSettings.densityPoints.some((point) => point.densityGcm3 !== null && !positiveFinite(point.densityGcm3))) diagnostics.push(diagnostic("ERROR", "INVALID_DENSITY", "Density values must be greater than zero."))
   if (density?.method === "nearest" && density.referenceTemperatureK !== null && Math.abs(density.referenceTemperatureK - temperatureK) > 1e-6) diagnostics.push(diagnostic("WARNING", "DENSITY_TEMPERATURE_MISMATCH", `Density reference is reported at ${density.referenceTemperatureK} K while this simulation is configured for ${temperatureK} K.`))
@@ -196,10 +197,10 @@ export function calculateBoxComposition(project: ProjectState, desId: string, so
   if (!density) return { diagnostics, candidates: [], selected: null, componentCounts: null, density, molecularWeights, metadata: null }
   const volume = boxVolumeNm3(project.protocol.box)
   const targetMassG = density.densityGcm3 * volume * NM3_TO_CM3
-  const actualSoluteMassG = soluteCount * molecularWeights[solute.id] / AVOGADRO
-  const referenceSoluteCount = system.compositionSettings.lockAcrossSeries ? system.compositionSettings.lockReferenceSoluteCount : soluteCount
+  const actualSoluteMassG = solute ? soluteCount * molecularWeights[solute.id] / AVOGADRO : 0
+  const referenceSoluteCount = solute && system.compositionSettings.lockAcrossSeries ? system.compositionSettings.lockReferenceSoluteCount : soluteCount
   if (!Number.isInteger(referenceSoluteCount) || referenceSoluteCount < 0) diagnostics.push(diagnostic("ERROR", "INVALID_LOCK_REFERENCE", "Locked-series reference loading must be a non-negative integer."))
-  const selectionSoluteMassG = referenceSoluteCount * molecularWeights[solute.id] / AVOGADRO
+  const selectionSoluteMassG = solute ? referenceSoluteCount * molecularWeights[solute.id] / AVOGADRO : 0
   const desiredDesMassG = system.compositionSettings.soluteMassMode === "include-in-target" ? targetMassG - selectionSoluteMassG : targetMassG
   if (!(desiredDesMassG > 0)) diagnostics.push(diagnostic("ERROR", "IMPOSSIBLE_TARGET_MASS", "Solute mass equals or exceeds the target mass for this box; no positive DES composition is possible."))
   const ratioUnitMassG = system.componentIds.reduce((sum, id, index) => sum + system.ratio[index] * molecularWeights[id] / AVOGADRO, 0)
@@ -207,9 +208,9 @@ export function calculateBoxComposition(project: ProjectState, desId: string, so
   if (diagnostics.some((item) => item.severity === "ERROR")) return { diagnostics, candidates: [], selected: null, componentCounts: null, density, molecularWeights, metadata: null }
   const idealMultiplier = desiredDesMassG / ratioUnitMassG
   const center = Math.max(1, Math.round(idealMultiplier))
-  const span = Math.max(1, Math.min(20, Math.trunc(system.compositionSettings.candidateSpan)))
+  const span = system.compositionSettings.candidateSpan
   const stateCount = system.compositionSettings.lockAcrossSeries ? referenceSoluteCount : soluteCount
-  const key = compositionStateKey(temperatureK, soluteId, stateCount)
+  const key = compositionStateKey(temperatureK, soluteId, stateCount, project, system)
   const preferred = system.compositionSettings.selectedMultipliers[key]
   const multipliers = new Set<number>()
   for (let n = Math.max(1, center - span); n <= center + span; n++) multipliers.add(n)

@@ -91,7 +91,8 @@ test("OPLS-AA topology import remains gated and merged .itp uses ORCA Mulliken c
     console.log(JSON.stringify({gated,ready:module.preparationStatus(prep),itp:module.generateItp(prep),mapping:module.generateAtomMappingCsv(prep),diagnostics:module.topologyDiagnostics(prep)}));
   `)
   assert.match(result.gated, /INCOMPLETE/)
-  assert.match(result.ready, /VALIDATED/)
+  assert.match(result.ready, /RESEARCHER ACCEPTED/)
+  assert.doesNotMatch(result.ready, /AUTOMATICALLY VERIFIED/)
   assert.match(result.itp, /-0\.40000000/)
   assert.match(result.itp, /0\.40000000/)
   assert.doesNotMatch(result.itp, /-0\.600000\s/)
@@ -105,7 +106,7 @@ test("Packmol, system topology, symmetric RDF pairs, blocks, and packed-count va
     const atom=(index,element,name,charge)=>({index,element,x:index-1,y:0,z:0,outIndex:index,outElement:element,gromacsName:name,residueName:'',mullikenCharge:charge,existingTopologyCharge:charge,finalCharge:charge,oplsType:'opls_test',mass:element==='H'?1.008:15.999,ljSource:'test',mappingStatus:'AUTO-MAPPED'});
     const prep=(id,residue)=>({moleculeId:id,residueName:residue,expectedFormalCharge:0,chargeTolerance:1e-4,chargeAcknowledged:false,xyzFile:null,outFile:null,xyzComment:'',xyzAtoms:[{index:1,element:'O',x:0,y:0,z:0},{index:2,element:'H',x:1,y:0,z:0}],outCoordinates:[],outCharges:[],atoms:[{...atom(1,'O','O1',-0.4),residueName:residue},{...atom(2,'H','H1',0.4),residueName:residue}],bonds:[{id:'1-2',ai:1,aj:2,elementI:'O',elementJ:'H',distanceAngstrom:1,proposed:false,accepted:true,source:'user'}],connectivityApproved:true,coordinateSettings:{center:false,translateAngstrom:{x:0,y:0,z:0}},orcaMetadata:{inputLine:'',method:'BP86',basis:'def2-TZVP',parsedTotalCharge:0,terminatedNormally:true},topologyFileName:'',topologyText:'[ atoms ]\\n1 opls_test 1 MOL O1 1 -0.6 15.999\\n2 opls_test 1 MOL H1 1 0.6 1.008\\n[ bonds ]\\n1 2 1',topologySections:[{name:'atoms',lines:['1 opls_test 1 MOL O1 1 -0.6 15.999','2 opls_test 1 MOL H1 1 0.6 1.008']},{name:'bonds',lines:['1 2 1']}],topologyReviewed:true,gromppValidated:true,notes:'',updatedAt:'now'});
     const preparations={a:prep('a','AAA'),b:prep('b','BBB'),s:prep('s','SOL')};
-    const run={runId:'TEST_RUN',stage:'A',desId:'des',desName:'A:B',desAbbreviation:'A-B',components:[{moleculeId:'a',name:'A',count:5,molecularWeight:17},{moleculeId:'b',name:'B',count:1,molecularWeight:17}],soluteId:'s',soluteName:'Solute',soluteAbbreviation:'S',soluteCount:2,moleFraction:0.25,totalMoleculeCount:8,moleFractions:{a:0.625,b:0.125,s:0.25},massFractions:null,numberDensitiesNm3:null,boxVolumeNm3:125,compositionCalculation:null,compositionDiagnostics:[],concentrationLabel:'N2',temperatureK:323.15,pressureBar:1,box:{x:5,y:5,z:5,geometry:'cubic',unit:'nm'},replica:1,randomSeed:1,protocolName:'test',forceField:'OPLS-AA',chargeScheme:'Mulliken',productionNs:100,status:'planned'};
+    const run={runId:'TEST_RUN',stage:'A',desId:'des',desName:'A:B',desAbbreviation:'A-B',components:[{moleculeId:'a',name:'A',count:5,molecularWeight:17},{moleculeId:'b',name:'B',count:1,molecularWeight:17}],soluteId:'s',soluteName:'Solute',soluteAbbreviation:'S',soluteCount:2,moleFraction:0.25,totalMoleculeCount:8,moleFractions:{a:0.625,b:0.125,s:0.25},massFractions:null,numberDensitiesNm3:null,boxVolumeNm3:125,compositionCalculation:null,compositionDiagnostics:[],concentrationLabel:'N2',temperatureK:323.15,pressureBar:1,box:{x:5,y:5,z:5,geometry:'cubic',unit:'nm'},replica:1,randomSeed:1,protocolName:'test',forceField:'OPLS-AA',chargeScheme:'Mulliken-derived charges from ORCA BP86/def2-TZVP',resolvedProtocol:{topologyInclude:'oplsaa.ff/forcefield.itp'},productionNs:100,status:'planned'};
     const packedAtoms=[]; let serial=1,residueNumber=1; for (const [residue,count] of [['AAA',5],['BBB',1],['SOL',2]]) for(let m=0;m<count;m++){ packedAtoms.push({serial:serial++,atomName:'O1',residueName:residue,residueNumber,xAngstrom:1,yAngstrom:1,zAngstrom:1,element:'O'}); packedAtoms.push({serial:serial++,atomName:'H1',residueName:residue,residueNumber:residueNumber++,xAngstrom:2,yAngstrom:1,zAngstrom:1,element:'H'}); }
     const packed={runId:run.runId,sourceFile:{name:'packed.pdb',text:'',size:0,lastModified:0,sha256:'test',importedAt:'now'},atoms:packedAtoms,cryst1Angstrom:{x:50,y:50,z:50},importedAt:'now'};
     const state={schemaVersion:'0.1',tutorialMode:true,selectedMoleculeId:'',selectedRunId:'',molecules:preparations,packedSystems:{},execution:{},packmol:{toleranceAngstrom:2,marginAngstrom:1,periodic:true},rdf:{mode:'center-of-mass',binWidthNm:0.002,rmaxNm:2.4,beginNs:0,endNs:100,customSelections:{},blocks:'0-20,20-40'},ssm:{sizesNm:'1.5,2.0,2.5',beginNs:0,endNs:100,pair:''},updatedAt:'now'};
@@ -126,7 +127,7 @@ test("Packmol, system topology, symmetric RDF pairs, blocks, and packed-count va
 
 test("unresolved absolute counts stop Packmol instead of turning a ratio into zero molecules", () => {
   const result = runModule(`
-    const run={runId:'UNRESOLVED',stage:'A',desId:'des',desName:'A:B',desAbbreviation:'A-B',components:[{moleculeId:'a',name:'A',count:null,molecularWeight:17},{moleculeId:'b',name:'B',count:null,molecularWeight:17}],soluteId:'s',soluteName:'Solute',soluteAbbreviation:'S',soluteCount:1,moleFraction:null,totalMoleculeCount:null,moleFractions:null,massFractions:null,numberDensitiesNm3:null,boxVolumeNm3:125,compositionCalculation:null,compositionDiagnostics:[],concentrationLabel:'N1',temperatureK:323.15,pressureBar:1,box:{x:5,y:5,z:5,geometry:'cubic',unit:'nm'},replica:1,randomSeed:1,protocolName:'test',forceField:'OPLS-AA',chargeScheme:'Mulliken',productionNs:100,status:'planned'};
+    const run={runId:'UNRESOLVED',stage:'A',desId:'des',desName:'A:B',desAbbreviation:'A-B',components:[{moleculeId:'a',name:'A',count:null,molecularWeight:17},{moleculeId:'b',name:'B',count:null,molecularWeight:17}],soluteId:'s',soluteName:'Solute',soluteAbbreviation:'S',soluteCount:1,moleFraction:null,totalMoleculeCount:null,moleFractions:null,massFractions:null,numberDensitiesNm3:null,boxVolumeNm3:125,compositionCalculation:null,compositionDiagnostics:[],concentrationLabel:'N1',temperatureK:323.15,pressureBar:1,box:{x:5,y:5,z:5,geometry:'cubic',unit:'nm'},replica:1,randomSeed:1,protocolName:'test',forceField:'OPLS-AA',chargeScheme:'Mulliken-derived charges from ORCA BP86/def2-TZVP',resolvedProtocol:{topologyInclude:'oplsaa.ff/forcefield.itp'},productionNs:100,status:'planned'};
     const state=module.defaultOrcaGromacsState();
     console.log(JSON.stringify({packmol:module.generatePackmolInput(run,{},state.packmol),topol:module.generateTopolTop(run,{})}));
   `)
@@ -137,13 +138,14 @@ test("unresolved absolute counts stop Packmol instead of turning a ratio into ze
   assert.match(result.topol, /UNRESOLVED/)
 })
 
-test("block filenames and edited command text retain deterministic provenance", () => {
+test("block parsing rejects malformed input and command drafts remain separate", () => {
   const result = runModule(`
     const state=module.defaultOrcaGromacsState(); state.commandOverrides['run:R1:rdf_all_pairs.sh']='researcher edited command';
-    console.log(JSON.stringify({window:module.inferTrajectoryWindow('rdf_GA_THY_20-40ns.xvg',{beginNs:0,endNs:100}),fallback:module.inferTrajectoryWindow('rdf_GA_THY.xvg',{beginNs:5,endNs:95}),edited:module.commandText(state,'run:R1:rdf_all_pairs.sh','generated'),generated:module.commandText(state,'run:R2:rdf_all_pairs.sh','generated')}));
+    let invalid=false;try{module.parseBlocks('0-20,typo,40-60')}catch{invalid=true}
+    console.log(JSON.stringify({blocks:module.parseBlocks('0-20,20-40'),invalid,edited:module.commandText(state,'run:R1:rdf_all_pairs.sh','generated'),generated:module.commandText(state,'run:R2:rdf_all_pairs.sh','generated')}));
   `)
-  assert.deepEqual(result.window, { beginNs: 20, endNs: 40, inferredFromFilename: true })
-  assert.deepEqual(result.fallback, { beginNs: 5, endNs: 95, inferredFromFilename: false })
+  assert.deepEqual(result.blocks,[{startNs:0,endNs:20},{startNs:20,endNs:40}])
+  assert.equal(result.invalid,true)
   assert.equal(result.edited, "researcher edited command")
   assert.equal(result.generated, "generated")
 })

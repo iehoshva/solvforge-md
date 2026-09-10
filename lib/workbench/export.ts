@@ -1,15 +1,35 @@
-import type { ProjectState, RDFDataset, RunRecord, ScientificState } from "./types"
-import { THESIS_DENSITY_REFERENCES_323K } from "./density-presets"
-import { commands, emMdp, nptMdp, nvtMdp, prodMdp } from "./runs"
-import { commandText, generateBlockRdfCommands, generateIndexNdx, generatePackedGro, generatePackmolInput, generateRdfCommands, generateSsmPreparationCommands, generateTopolTop, GROMACS_STAGE_COMMANDS, preparationPackageFiles, validatePackedSystem, type OrcaGromacsState } from "./orca-gromacs"
+import type { ProjectState, RunRecord } from "./types"
+import { makeZip } from "./zip.ts"
+export { makeZip } from "./zip.ts"
+import { commands, firstContinuation } from "./runs.ts"
+
+export function clearPreparedExport() {
+  const previous=document.getElementById("solvforge-prepared-export")
+  if(previous){const link=previous.querySelector("a");if(link)URL.revokeObjectURL(link.href);previous.remove()}
+}
 
 export function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob)
+  clearPreparedExport()
+  const panel=document.createElement("div")
+  panel.id="solvforge-prepared-export"
+  panel.setAttribute("role","status")
+  panel.style.cssText="position:fixed;bottom:16px;right:16px;z-index:1000;background:#fff;color:#162b22;border:1px solid #547361;padding:12px;max-width:90vw;font:14px system-ui;box-shadow:0 2px 10px #0002"
   const a = document.createElement("a")
   a.href = url
   a.download = filename
+  a.textContent="Download "+filename
+  a.style.textDecoration="underline"
+  const dismiss=document.createElement("button")
+  dismiss.textContent="Dismiss"
+  dismiss.style.marginLeft="16px"
+  dismiss.onclick=()=>{URL.revokeObjectURL(url);panel.remove()}
+  panel.appendChild(a)
+  panel.appendChild(dismiss)
+  document.body.appendChild(panel)
+  // Preserve a real, visible link if an asynchronous browser download is blocked.
+  // The object URL is revoked on dismissal or replacement, not before retrieval.
   a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 export function downloadJson(filename: string, data: unknown) {
@@ -20,127 +40,23 @@ export function downloadText(filename: string, text: string, type = "text/plain"
   downloadBlob(filename, new Blob([text], { type }))
 }
 
-function crc32(data: Uint8Array) {
-  let crc = 0xffffffff
-  for (const byte of data) {
-    crc ^= byte
-    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1))
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-function u16(n: number) { return [n & 255, (n >>> 8) & 255] }
-function u32(n: number) { return [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255] }
-
-export function makeZip(files: Array<{ path: string; content: string }>) {
-  const encoder = new TextEncoder()
-  const local: number[] = [], central: number[] = []
-  let offset = 0
-  for (const file of files) {
-    const name = encoder.encode(file.path), data = encoder.encode(file.content), crc = crc32(data)
-    const header = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0)]
-    local.push(...header, ...name, ...data)
-    const c = [...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset)]
-    central.push(...c, ...name)
-    offset += header.length + name.length + data.length
-  }
-  const end = [...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(central.length), ...u32(local.length), ...u16(0)]
-  return new Blob([new Uint8Array([...local, ...central, ...end])], { type: "application/zip" })
-}
-
-function compositionPreparationNotes(run: RunRecord) {
+export function compositionPreparationNotes(run: RunRecord) {
   const calculation = run.compositionCalculation
   if (!calculation) return `BOX COMPOSITION UNRESOLVED\n\nRun: ${run.runId}\nNo absolute solvent composition was generated. Provide positive manual component counts or a supported box geometry, target density at the state-point temperature, valid integer molar ratio, and molecular weights.\n\nDiagnostics:\n${run.compositionDiagnostics.map((item) => `[${item.severity}] ${item.code}: ${item.message}`).join("\n") || "No diagnostics recorded."}\n`
-  const species = [...run.components.map((component) => ({ id: component.moleculeId, name: component.name, count: component.count, mw: component.molecularWeight })), { id: run.soluteId, name: run.soluteName, count: run.soluteCount, mw: calculation.molecularWeightsUsed[run.soluteId] }]
+  const species = [...run.components.map((component) => ({ id: component.moleculeId, name: component.name, count: component.count, mw: component.molecularWeight })), ...(run.systemKind === "pure-des" ? [] : [{ id: run.soluteId, name: run.soluteName, count: run.soluteCount, mw: calculation.molecularWeightsUsed[run.soluteId] }])]
   return `BOX COMPOSITION PREPARATION NOTES\n\nRun: ${run.runId}\nMethod: ${calculation.mode}\nSolute-mass assumption: ${calculation.soluteMassMode}\nLock DES counts across series: ${calculation.lockAcrossSeries}\nRequested ratio: ${calculation.ratio.join(":")}\nActual DES ratio: ${calculation.actualDesRatio.map((value) => value.toFixed(8)).join(":")}\nBox input: ${calculation.boxInput.x} x ${calculation.boxInput.y} x ${calculation.boxInput.z} ${calculation.boxInput.unit}; ${calculation.boxInput.geometry}\nCanonical box: ${calculation.boxDimensionsNm.x} x ${calculation.boxDimensionsNm.y} x ${calculation.boxDimensionsNm.z} nm\nVolume: ${calculation.volumeNm3} nm^3\nTarget density: ${calculation.targetDensityGcm3 ?? "not supplied"} g cm^-3\nDensity reference temperature: ${calculation.densityReferenceTemperatureK ?? "not supplied"} K\nDensity label / reference: ${calculation.densityLabel || "not supplied"}; ${calculation.densityReferenceId ?? "custom record"}\nDensity provenance: ${calculation.densityStatus ?? "not supplied"}; derivation=${calculation.densityDerivation ?? "not supplied"}\nDensity uncertainty: ${calculation.densityUncertaintyGcm3 ?? "not quantified"} g cm^-3\nDensity source note: ${calculation.densitySourceNote || "no source note"}\nDensity method: ${calculation.densityMethodNote || "not supplied"}\nDensity citations: ${calculation.densitySources.map((source) => `${source.citation} — ${source.url}`).join(" | ") || "not supplied"}\nDensity resolution: ${calculation.densityResolution}\nEstimated total density: ${calculation.estimatedDensityGcm3 ?? "unavailable"} g cm^-3\nEstimated DES-only density: ${calculation.desOnlyDensityGcm3 ?? "unavailable"} g cm^-3\nTarget-density deviation: ${calculation.densityDeviationPct ?? "unavailable"} %\n\nSPECIES\n${species.map((item) => `${item.name} [${item.id}]: N=${item.count}; MW=${item.mw ?? "missing"} g mol^-1; x=${calculation.moleFractions[item.id] ?? "unavailable"}; w=${calculation.massFractions[item.id] ?? "unavailable"}; number density=${calculation.numberDensitiesNm3[item.id] ?? "unavailable"} molecules nm^-3`).join("\n")}\n\nTotal number density: ${calculation.totalNumberDensityNm3} molecules nm^-3\n\nDIAGNOSTICS\n${run.compositionDiagnostics.map((item) => `[${item.severity}] ${item.code}: ${item.message}`).join("\n") || "No diagnostics."}\n\nReview molecular structures, protonation states, topology compatibility, and packing/equilibration before production. The mass-density calculation provides an integer starting composition, not a guarantee of equilibrated density.\n`
 }
 
-export function exportProjectZip(project: ProjectState, runs: RunRecord[], datasets: RDFDataset[] = [], scientific?: ScientificState, orcaGromacs?: OrcaGromacsState) {
-  const root = `${project.projectAbbreviation.toLowerCase()}-md-workbench`
-  const files: Array<{ path: string; content: string }> = [
-    { path: `${root}/project_manifest.json`, content: JSON.stringify(project, null, 2) },
-    { path: `${root}/protocol.json`, content: JSON.stringify(project.protocol, null, 2) },
-    { path: `${root}/molecule_library.json`, content: JSON.stringify(project.molecules, null, 2) },
-    { path: `${root}/presets/density_reference_library_323.15K.json`, content: JSON.stringify(THESIS_DENSITY_REFERENCES_323K, null, 2) },
-    { path: `${root}/simulation_manifest.json`, content: JSON.stringify(runs, null, 2) },
-    { path: `${root}/composition_manifest.csv`, content: runsCsv(runs) },
-    { path: `${root}/analysis/rdf_datasets.json`, content: JSON.stringify(datasets, null, 2) },
-    ...(scientific ? [{ path: `${root}/analysis/scientific_state.json`, content: JSON.stringify(scientific, null, 2) }] : []),
-    { path: `${root}/presets/active_preset.json`, content: JSON.stringify({ name: project.presetName, project }, null, 2) },
-    ...(orcaGromacs ? [{ path: `${root}/manifests/orca_gromacs_state.json`, content: JSON.stringify(orcaGromacs, null, 2) }] : []),
-    { path: `${root}/README.txt`, content: "SolvForge MD v1.0\n\nRun order: prepare and validate each molecule from ORCA → calculate box composition → run Packmol → validate packed coordinates against topol.top → grompp/mdrun EM → NVT → NPT → production → gmx rdf → KBI.\n\nGenerated inputs are research artifacts, not a guarantee of scientific validity. Review every atom mapping, OPLS-AA type, bonded parameter, Mulliken charge, molecular count, density source, index/selection group, coupling group, MDP directive, and GROMACS diagnostic. Absolute molecule counts are never inferred from a molar ratio alone. ORCA supplies geometry and charges; it does not supply an OPLS-AA force field. Never use an INCOMPLETE molecular .itp for production MD.\n" },
-    ...(orcaGromacs ? [{ path: `${root}/README_ORCA_TO_GROMACS.txt`, content: "ORCA → GROMACS PREPARATION\n\n1. Inspect original .xyz and .out files in molecules/*/source.\n2. Audit atom_mapping.csv and charges.csv. Atom order is preserved; Mulliken charges are not normalized.\n3. Run/review x2top or another defensible OPLS-AA parameter mapping. Confirm atom types, LJ parameters, bonds, angles, proper/improper torsions, pairs, and exclusions.\n4. Accept connectivity and topology only after chemical review. Run gmx grompp; do not suppress unresolved errors.\n5. Run Packmol with packing/<RUN_ID>/packmol.inp. Import packed.pdb into the Workbench and validate species/atom counts.\n6. Use generated packed.gro, topol.top, index.ndx and editable .mdp files for EM, NVT, NPT, and production.\n7. Inspect maximum force, temperature, density/volume, pressure, LINCS messages, replica consistency, and block convergence.\n8. Run scripts/rdf_all_pairs.sh and import RDF .xvg files into KBI Analyzer.\n\nThe thesis preset records OPLS-AA plus raw ORCA BP86/def2-TZVP Mulliken partial charges.\n" }] : []),
-  ]
-  if (orcaGromacs) {
-    for (const file of preparationPackageFiles(orcaGromacs)) files.push({ path: `${root}/${file.path}`, content: file.content })
-    for (const preparation of Object.values(orcaGromacs.molecules)) {
-      if (preparation.xyzFile) files.push({ path: `${root}/orca/${preparation.moleculeId}/${preparation.xyzFile.name}`, content: preparation.xyzFile.text })
-      if (preparation.outFile) files.push({ path: `${root}/orca/${preparation.moleculeId}/${preparation.outFile.name}`, content: preparation.outFile.text })
-    }
-  }
-  for (const run of runs) {
-    const base = `${root}/runs/${run.runId}`
-    files.push(
-      { path: `${base}/metadata.json`, content: JSON.stringify(run, null, 2) },
-      { path: `${base}/composition.json`, content: JSON.stringify({ components: run.components, solute: { moleculeId: run.soluteId, name: run.soluteName, count: run.soluteCount }, calculation: run.compositionCalculation, diagnostics: run.compositionDiagnostics }, null, 2) },
-      { path: `${base}/molecule_manifest.json`, content: JSON.stringify({ components: run.components, solute: project.molecules.find((molecule) => molecule.id === run.soluteId), molecularWeightsUsed: run.compositionCalculation?.molecularWeightsUsed ?? {} }, null, 2) },
-      { path: `${base}/01_em/em.mdp`, content: emMdp(project) },
-      { path: `${base}/02_nvt/nvt.mdp`, content: nvtMdp(project, run) },
-      { path: `${base}/03_npt/npt.mdp`, content: nptMdp(project, run) },
-      { path: `${base}/04_prod/prod.mdp`, content: prodMdp(project, run) },
-      { path: `${base}/commands.sh`, content: commands(run) },
-      { path: `${base}/00_input/README.txt`, content: `Place reviewed coordinates, topology, force-field files, and index files here.\n\n${compositionPreparationNotes(run)}` },
-      { path: `${base}/00_input/composition-preparation.txt`, content: compositionPreparationNotes(run) },
-      { path: `${base}/analysis/rdf/.keep`, content: "" },
-      { path: `${base}/analysis/blocks/.keep`, content: "" },
-      { path: `${base}/analysis/kbi/.keep`, content: "" },
-      { path: `${base}/analysis/ssm/.keep`, content: "" },
-      { path: `${base}/analysis/kb_matrix/.keep`, content: "" },
-      { path: `${base}/analysis/thermo/.keep`, content: "" },
-      { path: `${base}/analysis/cosmo_validation/.keep`, content: "" },
-    )
-    if (orcaGromacs) {
-      const packed = orcaGromacs.packedSystems[run.runId]
-      const packDiagnostics = validatePackedSystem(run, packed ?? null, orcaGromacs.molecules)
-      const editable = (filename: string, generated: string) => commandText(orcaGromacs, `run:${run.runId}:${filename}`, generated)
-      files.push(
-        { path: `${root}/packing/${run.runId}/packmol.inp`, content: editable("packmol.inp", generatePackmolInput(run, orcaGromacs.molecules, orcaGromacs.packmol)) },
-        { path: `${root}/packing/${run.runId}/run_packmol.sh`, content: `#!/usr/bin/env bash\nset -euo pipefail\n${editable("run_packmol.sh", "packmol < packmol.inp")}\n` },
-        { path: `${root}/topology/${run.runId}/topol.top`, content: generateTopolTop(run, orcaGromacs.molecules, "../../molecules") },
-        { path: `${base}/00_input/topol.top`, content: generateTopolTop(run, orcaGromacs.molecules) },
-        { path: `${root}/scripts/${run.runId}/em.sh`, content: editable("em.sh", GROMACS_STAGE_COMMANDS.em) },
-        { path: `${root}/scripts/${run.runId}/nvt.sh`, content: editable("nvt.sh", GROMACS_STAGE_COMMANDS.nvt) },
-        { path: `${root}/scripts/${run.runId}/npt.sh`, content: editable("npt.sh", GROMACS_STAGE_COMMANDS.npt) },
-        { path: `${root}/scripts/${run.runId}/production.sh`, content: editable("production.sh", GROMACS_STAGE_COMMANDS.production) },
-        { path: `${root}/scripts/${run.runId}/rdf_all_pairs.sh`, content: editable("rdf_all_pairs.sh", generateRdfCommands(run, orcaGromacs.molecules, orcaGromacs.rdf)) },
-        { path: `${root}/scripts/${run.runId}/rdf_blocks.sh`, content: editable("rdf_blocks.sh", generateBlockRdfCommands(run, orcaGromacs.molecules, orcaGromacs.rdf)) },
-        { path: `${root}/scripts/${run.runId}/ssm_prepare.sh`, content: editable("ssm_prepare.sh", generateSsmPreparationCommands(run, orcaGromacs.molecules, orcaGromacs)) },
-        { path: `${root}/manifests/${run.runId}_preparation_validation.json`, content: JSON.stringify({ packedSystemImported: Boolean(packed), diagnostics: packDiagnostics, execution: orcaGromacs.execution[run.runId] ?? null }, null, 2) },
-        { path: `${base}/run_em.sh`, content: editable("em.sh", GROMACS_STAGE_COMMANDS.em) },
-        { path: `${base}/run_nvt.sh`, content: editable("nvt.sh", GROMACS_STAGE_COMMANDS.nvt) },
-        { path: `${base}/run_npt.sh`, content: editable("npt.sh", GROMACS_STAGE_COMMANDS.npt) },
-        { path: `${base}/run_production.sh`, content: editable("production.sh", GROMACS_STAGE_COMMANDS.production) },
-        { path: `${base}/analysis/rdf/rdf_all_pairs.sh`, content: editable("rdf_all_pairs.sh", generateRdfCommands(run, orcaGromacs.molecules, orcaGromacs.rdf)) },
-        { path: `${base}/analysis/blocks/rdf_blocks.sh`, content: editable("rdf_blocks.sh", generateBlockRdfCommands(run, orcaGromacs.molecules, orcaGromacs.rdf)) },
-        { path: `${base}/analysis/ssm/ssm_prepare.sh`, content: editable("ssm_prepare.sh", generateSsmPreparationCommands(run, orcaGromacs.molecules, orcaGromacs)) },
-      )
-      for (const species of run.components.map((component) => component.moleculeId).concat(run.soluteId)) {
-        const preparation = orcaGromacs.molecules[species]
-        if (preparation) files.push({ path: `${base}/00_input/${species.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}.itp`, content: preparationPackageFiles({ ...orcaGromacs, molecules: { [species]: preparation } }).find((file) => file.path.endsWith(".itp"))?.content ?? "; INCOMPLETE — molecular topology unavailable\n" })
-      }
-      if (packed) {
-        files.push(
-          { path: `${root}/packing/${run.runId}/${packed.sourceFile.name}`, content: packed.sourceFile.text },
-          { path: `${root}/packing/${run.runId}/packed.gro`, content: generatePackedGro(run, packed) },
-          { path: `${root}/topology/${run.runId}/index.ndx`, content: generateIndexNdx(packed, run, orcaGromacs.molecules) },
-          { path: `${base}/00_input/${packed.sourceFile.name}`, content: packed.sourceFile.text },
-          { path: `${base}/00_input/packed.gro`, content: generatePackedGro(run, packed) },
-          { path: `${base}/00_input/index.ndx`, content: generateIndexNdx(packed, run, orcaGromacs.molecules) },
-        )
-      }
-    }
-  }
-  return makeZip(files)
+/** Planning-only package. Runnable inputs are validated/frozen by packages.runInputSnapshot. */
+export function exportProjectZip(project:ProjectState,runs:RunRecord[]){
+ const files:Array<{path:string;content:string}>=[{path:"project_manifest.json",content:JSON.stringify(project,null,2)},{path:"simulation_manifest.json",content:JSON.stringify(runs,null,2)},{path:"README.txt",content:"SolvForge MD MDP Planning Package. This is not a runnable system: supply mapped OPLS-AA topologies and validated packed coordinates through ORCA → GROMACS, then export a Run Input Package from Data / Export. GROMACS and Packmol execute externally."}]
+ for(const run of runs){
+  if(!run.resolvedProtocol||run.resolvedProtocol.diagnostics.some(d=>d.severity==="ERROR"))throw new Error("Resolve all MDP errors before planning export.")
+  const base="runs/"+run.runId
+  files.push({path:base+"/resolved_protocol.json",content:JSON.stringify(run.resolvedProtocol,null,2)},{path:base+"/metadata.json",content:JSON.stringify(run,null,2)},{path:base+"/commands.sh",content:commands(run)},{path:base+"/04_prod/continuation.sh",content:firstContinuation(run)})
+  for(const [stage,dir]of [["em","01_em"],["nvt","02_nvt"],["npt","03_npt"],["prod","04_prod"]]as const)files.push({path:base+"/"+dir+"/"+stage+".mdp",content:run.resolvedProtocol.stages[stage].mdp})
+ }
+ return makeZip(files)
 }
 
 export function runsCsv(runs: RunRecord[]) {

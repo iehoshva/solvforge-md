@@ -1,4 +1,6 @@
+import { uuid } from "./crypto.ts"
 import type { ActivityResult, SSMFit, SSMPoint, ThermodynamicResult, ValidationResult } from "./types"
+import { runningKbi } from "./integration.ts"
 
 export const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length
 
@@ -28,9 +30,11 @@ export const tCritical95 = (degreesOfFreedom: number) => degreesOfFreedom <= 0 ?
 
 export function weightedLinearRegression(x: number[], y: number[], uncertainty?: Array<number | null>) {
   if (x.length !== y.length || x.length < 2) throw new Error("Regression requires at least two paired observations.")
+  if (x.some(v=>!Number.isFinite(v)) || y.some(v=>!Number.isFinite(v))) throw new Error("Regression inputs must be finite.")
+  const completeUncertainty = uncertainty?.length === x.length && uncertainty.every(v=>v!==null && Number.isFinite(v) && v>0)
   const weights = x.map((_, index) => {
     const value = uncertainty?.[index]
-    return value && value > 0 ? 1 / value ** 2 : 1
+    return completeUncertainty && value ? 1 / value ** 2 : 1
   })
   const sw = weights.reduce((a, b) => a + b, 0)
   const sx = x.reduce((sum, value, i) => sum + weights[i] * value, 0)
@@ -60,7 +64,10 @@ export function weightedLinearRegression(x: number[], y: number[], uncertainty?:
 
 /** Small System Method: G^V(L)=G∞+F∞/L, or equivalently L G^V=G∞L+F∞. */
 export function fitSsm(points: SSMPoint[], representation: SSMFit["representation"], minimumPoints = 3): SSMFit {
+  minimumPoints = Math.max(3, minimumPoints)
   const accepted = points.filter((point) => point.accepted)
+  if (accepted.some(p=>!Number.isFinite(p.effectiveLengthNm)||p.effectiveLengthNm<=0||!Number.isFinite(p.finiteKbiNm3))) throw new Error("Invalid finite-size input.")
+  if (new Set(accepted.map(p=>p.stateKey)).size>1 || new Set(accepted.map(p=>[p.speciesA,p.speciesB].sort().join("|"))).size>1) throw new Error("Finite-size regression cannot mix state families or observables.")
   if (accepted.length < minimumPoints) throw new Error(`Insufficient finite-size data: ${accepted.length} accepted point(s); at least ${minimumPoints} required.`)
   if (new Set(accepted.map((point) => point.effectiveLengthNm)).size < minimumPoints) throw new Error("Insufficient distinct finite-size lengths for extrapolation.")
   let x: number[]
@@ -69,11 +76,11 @@ export function fitSsm(points: SSMPoint[], representation: SSMFit["representatio
   if (representation === "g-vs-inverse-l") {
     x = accepted.map((point) => 1 / point.effectiveLengthNm)
     y = accepted.map((point) => point.finiteKbiNm3)
-    uncertainty = accepted.map((point) => point.uncertaintyNm3)
+    uncertainty = accepted.every(p=>p.uncertaintyNm3!==null && p.uncertaintyNm3>0) ? accepted.map(p=>p.uncertaintyNm3) : accepted.map(()=>1)
   } else {
     x = accepted.map((point) => point.effectiveLengthNm)
     y = accepted.map((point) => point.effectiveLengthNm * point.finiteKbiNm3)
-    uncertainty = accepted.map((point) => point.uncertaintyNm3 === null ? null : point.effectiveLengthNm * point.uncertaintyNm3)
+    uncertainty = accepted.every(p=>p.uncertaintyNm3!==null && p.uncertaintyNm3>0) ? accepted.map(p=>p.effectiveLengthNm*p.uncertaintyNm3!) : accepted.map(p=>p.effectiveLengthNm)
   }
   const regression = weightedLinearRegression(x, y, uncertainty)
   const gInfinityNm3 = representation === "g-vs-inverse-l" ? regression.intercept : regression.slope
@@ -82,7 +89,7 @@ export function fitSsm(points: SSMPoint[], representation: SSMFit["representatio
   const fInfinitySe = representation === "g-vs-inverse-l" ? regression.slopeSe : regression.interceptSe
   const gInfinityCi95 = representation === "g-vs-inverse-l" ? regression.interceptCi95 : regression.slopeCi95
   const fInfinityCi95 = representation === "g-vs-inverse-l" ? regression.slopeCi95 : regression.interceptCi95
-  return { id: crypto.randomUUID(), stateKey: accepted[0].stateKey, pairKey: [accepted[0].speciesA, accepted[0].speciesB].sort().join("—"), representation, pointIds: accepted.map((point) => point.id), gInfinityNm3, fInfinityNm4, gInfinitySe, fInfinitySe, gInfinityCi95, fInfinityCi95, r2: regression.r2, residuals: regression.residuals, leverage: regression.leverage, accepted: false, createdAt: new Date().toISOString() }
+  return { id: uuid(), stateKey: accepted[0].stateKey, pairKey: [accepted[0].speciesA, accepted[0].speciesB].sort().join("—"), representation, pointIds: accepted.map((point) => point.id), gInfinityNm3, fInfinityNm4, gInfinitySe, fInfinitySe, gInfinityCi95, fInfinityCi95, r2: regression.r2, residuals: regression.residuals, leverage: regression.leverage, accepted: false, createdAt: new Date().toISOString() }
 }
 
 export function determinant(matrix: number[][]): number {
@@ -128,34 +135,43 @@ const infinityNorm = (matrix: number[][]) => Math.max(...matrix.map((row) => row
 export const conditionNumber = (matrix: number[][], inverted = inverse(matrix)) => infinityNorm(matrix) * infinityNorm(inverted)
 
 /**
- * Ternary Kirkwood–Buff thermodynamic factors at constant T,p.
- * Species 3 is the dependent composition coordinate. Equations are the explicit
- * ternary form reported by Fingerhut et al. (Mol. Phys. 2020, DOI 10.1080/00268976.2019.1643046).
- * G is in volume units and rho in inverse-volume units, so every Gamma is dimensionless.
+ * Molecular, constant-T,p KB inversion (no DES pseudocomponent).
+ * B_ij = rho_i delta_ij + rho_i rho_j G_ij; S=B/rho; A=S^-1.
+ * D=A-(Ax)(x^T A)/(x^T A x); Gamma_ij=x_i(D_ij-D_i3), i,j=1,2.
+ * Species 3 is dependent; fixed solvent ratio q=x2/(x2+x3):
+ * Gamma_path=Gamma_11-q Gamma_12. This is x1 d(beta mu1)/dx1.
+ * Literature: Kirkwood & Buff (1951), O'Connell & DeGance (1975);
+ * matrix equations 8,13,17,19–21 at https://arxiv.org/html/2510.04636v1.
+ * A direct Gibbs-Duhem projection avoids a potentially inconsistent hard-coded ternary polynomial.
  */
 export function ternaryThermodynamicFactor(kbi: number[][], densities: number[]) {
-  if (kbi.length !== 3 || kbi.some((row) => row.length !== 3) || densities.length !== 3) throw new Error("The implemented ternary formalism requires a complete 3 × 3 KB matrix and three densities.")
-  if (densities.some((value) => !Number.isFinite(value) || value <= 0)) throw new Error("All three molecular number densities must be positive and finite.")
-  const [r1, r2, r3] = densities
-  const [g11, g12, g13, g22, g23, g33] = [kbi[0][0], kbi[0][1], kbi[0][2], kbi[1][1], kbi[1][2], kbi[2][2]]
-  const d12 = g11 + g22 - 2 * g12
-  const d13 = g11 + g33 - 2 * g13
-  const d23 = g22 + g33 - 2 * g23
-  const eta = r1 + r2 + r3 + r1 * r2 * d12 + r1 * r3 * d13 + r2 * r3 * d23 - 0.25 * r1 * r2 * r3 * (d12 ** 2 + d13 ** 2 + d23 ** 2 - 2 * (d13 * d23 + d12 * d13 + d12 * d23))
-  if (!Number.isFinite(eta) || Math.abs(eta) < 1e-14) throw new Error("The ternary thermodynamic-factor denominator η is singular or numerically unstable.")
-  const gamma11 = (r1 + r2 + r3 + r1 * r2 * (g22 - g12 + g13 - g23) + r2 * r3 * d23) / eta
-  const gamma12 = r1 * (r2 * (g22 - g12 + g13 - g23) - r3 * (g33 - g13 + g12 - g23)) / eta
-  const gamma21 = r2 * (r1 * (g11 - g12 + g23 - g13) - r3 * (g33 - g13 + g12 - g23)) / eta
-  const gamma22 = (r1 + r2 + r3 + r1 * r2 * (g11 - g12 - g13 + g23) + r1 * r3 * d13) / eta
-  const transformedB = kbi.map((row, i) => row.map((gij, j) => densities[i] * densities[j] * gij + (i === j ? densities[i] : 0)))
-  const inverseB = inverse(transformedB)
-  const desFractionComponent2 = r2 / (r2 + r3)
-  // Along a fixed component-2:component-3 DES ratio, dx2/dx1 = -q.
-  const fixedDesRatioSoluteGamma = gamma11 - desFractionComponent2 * gamma12
-  return { eta, gammaMatrix: [[gamma11, gamma12], [gamma21, gamma22]], transformedB, inverseB, determinantB: determinant(transformedB), conditionNumber: conditionNumber(transformedB, inverseB), fixedDesRatioSoluteGamma }
+  if(kbi.length!==3||kbi.some(r=>r.length!==3)||densities.length!==3)throw new Error("Exactly three molecular species and a complete 3×3 matrix are required.")
+  if(densities.some(v=>!Number.isFinite(v)||v<=0)||kbi.some(r=>r.some(v=>!Number.isFinite(v))))throw new Error("Finite KB values and positive molecular number densities are required.")
+  for(let i=0;i<3;i++)for(let j=0;j<3;j++)if(Math.abs(kbi[i][j]-kbi[j][i])>1e-12*Math.max(1,Math.abs(kbi[i][j])))throw new Error("KB matrix must be symmetric; asymmetric terms cannot be silently averaged.")
+  const total=densities.reduce((a,b)=>a+b,0),x=densities.map(v=>v/total)
+  const transformedB=kbi.map((row,i)=>row.map((g,j)=>densities[i]*densities[j]*g+(i===j?densities[i]:0)))
+  const S=transformedB.map(r=>r.map(v=>v/total))
+  cholesky(S) // Stable equilibrium fluctuation matrix must be positive definite.
+  const inverseB=inverse(transformedB),A=inverse(S),Ax=A.map(row=>row.reduce((sum,v,i)=>sum+v*x[i],0)),denom=x.reduce((s,v,i)=>s+v*Ax[i],0)
+  if(!(denom>0))throw new Error("Fluctuation matrix violates stability/compressibility positivity.")
+  const D=A.map((r,i)=>r.map((v,j)=>v-Ax[i]*Ax[j]/denom))
+  const gammaMatrix=[0,1].map(i=>[0,1].map(j=>x[i]*(D[i][j]-D[i][2])))
+  const fixedDesRatioSoluteGamma=gammaMatrix[0][0]-x[1]/(x[1]+x[2])*gammaMatrix[0][1]
+  return {eta:denom,gammaMatrix,transformedB,inverseB,determinantB:determinant(transformedB),conditionNumber:conditionNumber(S,A),fixedDesRatioSoluteGamma,structureFactor:S,inverseStructureFactor:A,gibbsProjection:D}
+}
+export function cholesky(a:number[][]) {
+  const n=a.length,L=Array.from({length:n},()=>Array(n).fill(0))
+  if(!n||a.some(r=>r.length!==n||r.some(v=>!Number.isFinite(v))))throw new Error("Covariance/fluctuation matrix must be finite and square.")
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++)if(Math.abs(a[i][j]-a[j][i])>1e-12*Math.max(1,Math.abs(a[i][j])))throw new Error("Covariance/fluctuation matrix must be symmetric.")
+  for(let i=0;i<n;i++)for(let j=0;j<=i;j++){
+    let s=a[i][j];for(let k=0;k<j;k++)s-=L[i][k]*L[j][k]
+    if(i===j){if(!(s>0)||!Number.isFinite(s))throw new Error("Matrix is not positive definite: stable fluctuation/covariance matrix required.");L[i][j]=Math.sqrt(s)}
+    else L[i][j]=s/L[j][j]
+  }
+  return L
 }
 
-function seededRandom(seed: number) {
+export function seededRandom(seed: number) {
   let state = seed >>> 0
   return () => { state += 0x6D2B79F5; let value = state; value = Math.imul(value ^ value >>> 15, value | 1); value ^= value + Math.imul(value ^ value >>> 7, value | 61); return ((value ^ value >>> 14) >>> 0) / 4294967296 }
 }
@@ -166,27 +182,28 @@ function normalSample(random: () => number) {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
 }
 
-export function propagateTernaryUncertainty(kbi: number[][], uncertainty: number[][], densities: number[], samples: number, seed: number) {
+export function propagateTernaryUncertainty(kbi: number[][], uncertainty: number[][], densities: number[], samples: number, seed: number, conditionLimit = 1e8, covariance?: number[][]) {
+  if (!Number.isInteger(samples)||samples<2||samples>100000||!Number.isSafeInteger(seed)) throw new Error("Use 2–100000 samples and an integer seed.")
+  if (uncertainty.length!==3||uncertainty.some(r=>r.length!==3||r.some(v=>!Number.isFinite(v)||v<0))) throw new Error("All propagated uncertainties must be explicitly known and nonnegative.")
+  const pairs=[[0,0],[0,1],[0,2],[1,1],[1,2],[2,2]]
+  const L=covariance ? cholesky(covariance) : null
+  if(L&&L.length!==6)throw new Error("KBI covariance requires a 6×6 matrix in 11,12,13,22,23,33 order.")
   const random = seededRandom(seed)
   const results: number[] = []
   for (let sample = 0; sample < samples; sample++) {
     const drawn = kbi.map((row) => [...row])
-    for (let i = 0; i < 3; i++) for (let j = i; j < 3; j++) {
-      const sigma = uncertainty[i]?.[j] ?? uncertainty[j]?.[i] ?? 0
-      const value = kbi[i][j] + (sigma > 0 ? sigma * normalSample(random) : 0)
-      drawn[i][j] = value
-      drawn[j][i] = value
-    }
-    try { results.push(ternaryThermodynamicFactor(drawn, densities).fixedDesRatioSoluteGamma) } catch { /* invalid draw is reported through validSamples */ }
+    const z=pairs.map(()=>normalSample(random))
+    pairs.forEach(([i,j],index)=>{ const delta=L?L[index].reduce((s,v,k)=>s+v*z[k],0):uncertainty[i][j]*z[index];drawn[i][j]=drawn[j][i]=kbi[i][j]+delta })
+    try { const calc=ternaryThermodynamicFactor(drawn,densities);if(calc.conditionNumber<=conditionLimit&&Number.isFinite(calc.fixedDesRatioSoluteGamma))results.push(calc.fixedDesRatioSoluteGamma) } catch { /* Count rejected draws explicitly. */ }
   }
-  if (!results.length) throw new Error("Every uncertainty draw produced an invalid thermodynamic matrix.")
-  return { sd: sampleSd(results), ci95: [quantile(results, 0.025), quantile(results, 0.975)] as [number, number], validSamples: results.length, requestedSamples: samples }
+  if (results.length < 2) throw new Error("Fewer than two valid uncertainty draws; no statistical interval is available.")
+  return { samples: results, seed, assumption: covariance ? "Supplied joint covariance of KBI estimates" : "Independent normal KBI estimates; correlations neglected", sd: sampleSd(results), ci95: [quantile(results, 0.025), quantile(results, 0.975)] as [number, number], validSamples: results.length, requestedSamples: samples }
 }
 
 export function buildThermodynamicResult(input: Omit<ThermodynamicResult, "id" | "transformedB" | "inverseB" | "determinantB" | "conditionNumber" | "gammaMatrix" | "fixedDesRatioSoluteGamma" | "uncertainty" | "createdAt">, bootstrapSamples: number, seed: number): ThermodynamicResult {
   const calculation = ternaryThermodynamicFactor(input.kbiMatrixNm3, input.numberDensitiesNm3)
-  const hasUncertainty = input.kbiUncertaintyNm3.some((row) => row.some((value) => value > 0))
-  return { ...input, id: crypto.randomUUID(), transformedB: calculation.transformedB, inverseB: calculation.inverseB, determinantB: calculation.determinantB, conditionNumber: calculation.conditionNumber, gammaMatrix: calculation.gammaMatrix, fixedDesRatioSoluteGamma: calculation.fixedDesRatioSoluteGamma, uncertainty: hasUncertainty ? propagateTernaryUncertainty(input.kbiMatrixNm3, input.kbiUncertaintyNm3, input.numberDensitiesNm3, bootstrapSamples, seed) : undefined, createdAt: new Date().toISOString() }
+  const hasUncertainty = input.uncertaintyProvenance?.length === 6 && input.uncertaintyProvenance.every(term=>term.kind!=="unknown")
+  return { ...input, id: uuid(), structureFactor:calculation.structureFactor,inverseStructureFactor:calculation.inverseStructureFactor,gibbsProjection:calculation.gibbsProjection, transformedB: calculation.transformedB, inverseB: calculation.inverseB, determinantB: calculation.determinantB, conditionNumber: calculation.conditionNumber, gammaMatrix: calculation.gammaMatrix, fixedDesRatioSoluteGamma: calculation.fixedDesRatioSoluteGamma, uncertainty: hasUncertainty ? propagateTernaryUncertainty(input.kbiMatrixNm3, input.kbiUncertaintyNm3, input.numberDensitiesNm3, bootstrapSamples, seed) : undefined, createdAt: new Date().toISOString() }
 }
 
 function interpolateLinear(points: Array<{ x: number; y: number }>, value: number) {
@@ -199,11 +216,15 @@ function interpolateLinear(points: Array<{ x: number; y: number }>, value: numbe
 
 function monotoneSlopes(points: Array<{ x: number; y: number }>) {
   const secants = points.slice(1).map((point, i) => (point.y - points[i].y) / (point.x - points[i].x))
+  const h=points.slice(1).map((p,i)=>p.x-points[i].x)
+  const endpoint=(h0:number,h1:number,d0:number,d1:number)=>{let d=((2*h0+h1)*d0-h0*d1)/(h0+h1);if(d*d0<=0)d=0;else if(d0*d1<=0&&Math.abs(d)>3*Math.abs(d0))d=3*d0;return d}
   return points.map((_, i) => {
-    if (i === 0) return secants[0]
-    if (i === points.length - 1) return secants.at(-1)!
+    if(points.length===2)return secants[0]
+    if (i === 0) return endpoint(h[0],h[1],secants[0],secants[1])
+    if (i === points.length - 1) return endpoint(h.at(-1)!,h.at(-2)!,secants.at(-1)!,secants.at(-2)!)
     if (secants[i - 1] * secants[i] <= 0) return 0
-    return 2 / (1 / secants[i - 1] + 1 / secants[i])
+    const w1=2*h[i]+h[i-1],w2=h[i]+2*h[i-1]
+    return (w1+w2)/(w1/secants[i-1]+w2/secants[i])
   })
 }
 
@@ -224,7 +245,9 @@ function interpolateMonotone(points: Array<{ x: number; y: number }>, value: num
  * KB derivatives alone do not determine the additive constant in ln(gamma).
  */
 export function integrateActivity(input: Array<{ x: number; thermodynamicFactor: number }>, interpolation: ActivityResult["interpolation"], anchor: ActivityResult["anchor"] = { type: "none", x: null, gamma: null }) {
-  const points = [...input].filter((point) => point.x > 0 && Number.isFinite(point.thermodynamicFactor)).sort((a, b) => a.x - b.x)
+  if(input.some(p=>!Number.isFinite(p.x)||p.x<=0||p.x>=1||!Number.isFinite(p.thermodynamicFactor)))throw new Error("Activity integration requires finite Γ and 0 < x < 1 for every input; invalid rows are not silently removed.")
+  if(anchor.type==="infinite-dilution")throw new Error("An infinite-dilution anchor needs an explicit model between zero and the sampled domain. Supply an in-domain composition anchor instead.")
+  const points = [...input].sort((a, b) => a.x - b.x)
   if (points.length < 2) throw new Error("Activity integration requires at least two validated positive-composition Γ points.")
   if (new Set(points.map((point) => point.x)).size !== points.length) throw new Error("Activity integration requires unique composition points.")
   const curve = points.map((point) => ({ x: point.x, y: (point.thermodynamicFactor - 1) / point.x }))
@@ -242,21 +265,31 @@ export function integrateActivity(input: Array<{ x: number; thermodynamicFactor:
     integrated.push(integrated[i - 1] + area)
   }
   let shift: number | null = null
-  if (anchor.gamma !== null && anchor.gamma > 0) {
-    if (anchor.type === "infinite-dilution") shift = Math.log(anchor.gamma)
-    else if (anchor.type === "composition" && anchor.x !== null) {
-      const anchorIndex = points.reduce((best, point, index) => Math.abs(point.x - anchor.x!) < Math.abs(points[best].x - anchor.x!) ? index : best, 0)
-      shift = Math.log(anchor.gamma) - integrated[anchorIndex]
+  if(anchor.type==="composition"){
+    if(anchor.x===null||!Number.isFinite(anchor.x)||anchor.gamma===null||!Number.isFinite(anchor.gamma)||anchor.gamma<=0||anchor.x<points[0].x||anchor.x>points.at(-1)!.x)throw new Error("Absolute anchor requires gamma > 0 at an exact x within the simulated composition domain.")
+    let area=0
+    for(let i=1;i<points.length;i++){
+      const left=points[i-1].x,right=Math.min(points[i].x,anchor.x)
+      if(right<=left)break
+      const step=(right-left)/100
+      for(let j=0;j<100;j++)area+=(interpolate(curve,left+j*step)+interpolate(curve,left+(j+1)*step))*step/2
+      if(right===anchor.x)break
     }
+    shift=Math.log(anchor.gamma)-area
   }
+  if(integrated.some(v=>!Number.isFinite(Math.exp(v))||(shift!==null&&!Number.isFinite(Math.exp(v+shift)))))throw new Error("Activity integration overflow: inspect Gamma, composition range and anchor.")
   return points.map((point, i) => ({ x: point.x, thermodynamicFactor: point.thermodynamicFactor, lnGammaRelative: integrated[i], gammaRelative: Math.exp(integrated[i]), gammaAbsolute: shift === null ? null : Math.exp(integrated[i] + shift) }))
 }
 
 export function polynomialRegression(x: number[], y: number[], degree: 1 | 2) {
+  if(x.length!==y.length||new Set(x).size!==x.length||x.some(v=>!Number.isFinite(v))||y.some(v=>!Number.isFinite(v)))throw new Error("Unique finite x values and a finite response for every point are required.")
+  const scale=x.reduce((m,v)=>Math.max(m,Math.abs(v)),0)
+  if(!(scale>0))throw new Error("Fit domain has no variation.")
+  x=x.map(v=>v/scale)
   if (x.length < degree + 2) throw new Error(`A degree-${degree} fit requires at least ${degree + 2} points.`)
   if (degree === 1) {
     const fit = weightedLinearRegression(x, y)
-    return { coefficients: [fit.intercept, fit.slope], r2: fit.r2, residuals: fit.residuals, interceptSe: fit.interceptSe, interceptCi95: fit.interceptCi95 }
+    return { coefficients: [fit.intercept, fit.slope/scale], r2: fit.r2, residuals: fit.residuals, interceptSe: fit.interceptSe, interceptCi95: fit.interceptCi95 }
   }
   const sums = Array.from({ length: 5 }, (_, power) => x.reduce((sum, value) => sum + value ** power, 0))
   const rhs = Array.from({ length: 3 }, (_, power) => x.reduce((sum, value, i) => sum + y[i] * value ** power, 0))
@@ -268,17 +301,19 @@ export function polynomialRegression(x: number[], y: number[], degree: 1 | 2) {
   const variance = sse / Math.max(1, x.length - 3)
   const interceptSe = Math.sqrt(Math.max(0, variance * inverse(design)[0][0]))
   const critical = tCritical95(x.length - 3)
-  return { coefficients, r2: total ? 1 - sse / total : 1, residuals, interceptSe, interceptCi95: [coefficients[0] - critical * interceptSe, coefficients[0] + critical * interceptSe] as [number, number] }
+  return { coefficients:coefficients.map((c,i)=>c/scale**i), r2: total ? 1 - sse / total : 1, residuals, interceptSe, interceptCi95: [coefficients[0] - critical * interceptSe, coefficients[0] + critical * interceptSe] as [number, number] }
 }
 
 export function extrapolateInfiniteDilution(points: Array<{ x: number; gamma: number }>, model: "linear" | "quadratic", maxX: number) {
+  if(!Number.isFinite(maxX)||maxX<=0||maxX>=1||points.some(p=>!Number.isFinite(p.x)||!Number.isFinite(p.gamma)||p.x<=0||p.x>=1||p.gamma<=0))throw new Error("Finite positive gamma and 0 < x, maxX < 1 are required.")
   const selected = points.filter((point) => point.x > 0 && point.x <= maxX && point.gamma > 0).sort((a, b) => a.x - b.x)
   const degree = model === "linear" ? 1 : 2
   const fit = polynomialRegression(selected.map((point) => point.x), selected.map((point) => Math.log(point.gamma)), degree)
   const sensitivityPoints = selected.slice(0, -1)
   let sensitivity: number | null = null
   if (sensitivityPoints.length >= degree + 2) sensitivity = Math.abs(Math.exp(polynomialRegression(sensitivityPoints.map((point) => point.x), sensitivityPoints.map((point) => Math.log(point.gamma)), degree).coefficients[0]) - Math.exp(fit.coefficients[0]))
-  return { model, gammaInfinity: Math.exp(fit.coefficients[0]), lnGammaInfinity: fit.coefficients[0], r2: fit.r2, ci95: [Math.exp(fit.interceptCi95[0]), Math.exp(fit.interceptCi95[1])] as [number, number], maxX, sensitivity }
+  if(!Number.isFinite(Math.exp(fit.coefficients[0])))throw new Error("Extrapolation overflows; inspect fit domain and model.")
+  return { model, gammaInfinity: Math.exp(fit.coefficients[0]), lnGammaInfinity: fit.coefficients[0], r2: fit.r2, ci95: [Math.exp(fit.interceptCi95[0]), Math.exp(fit.interceptCi95[1])] as [number, number], maxX, sensitivity, coefficients:fit.coefficients,residuals:fit.residuals,sampledX:selected.map(p=>p.x) }
 }
 
 function ranks(values: number[]) {
@@ -322,14 +357,8 @@ export function runValidationSuite(): ValidationResult[] {
   const timestamp = new Date().toISOString()
   const create = (id: string, name: string, tolerance: number, expected: number | string, calculated: number | string, absoluteError: number | null, relativeError: number | null, detail: string): ValidationResult => ({ id, name, passed: absoluteError === null ? expected === calculated : absoluteError <= tolerance, tolerance, expected, calculated, absoluteError, relativeError, detail, runAt: timestamp })
   const radius = Array.from({ length: 2001 }, (_, i) => i * 0.005)
-  const integrate = (g: number[]) => {
-    let total = 0
-    for (let i = 1; i < radius.length; i++) {
-      const a = 4 * Math.PI * (g[i - 1] - 1) * radius[i - 1] ** 2, b = 4 * Math.PI * (g[i] - 1) * radius[i] ** 2
-      total += 0.5 * (a + b) * (radius[i] - radius[i - 1])
-    }
-    return total
-  }
+  const integrate = (g: number[]) => runningKbi(radius,g,"trapezoidal").at(-1)!
+
   const ideal = integrate(radius.map(() => 1))
   const amplitude = 0.7, lambda = 0.35
   const exponential = integrate(radius.map((r) => 1 + amplitude * Math.exp(-r / lambda)))

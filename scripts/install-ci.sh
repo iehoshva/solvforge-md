@@ -68,7 +68,20 @@ use_seeded_cache=0
 seed_cache="${SITES_NPM_CACHE_SEED:-}"
 if [[ -n "${seed_cache}" && -d "${seed_cache}" ]]; then
   seed_lockfile_sha256="$(cat "${seed_cache}/.sites-lockfile-sha256" || true)"
-  if [[ "${seed_lockfile_sha256}" == "${lockfile_sha256}" ]]; then
+  # Renaming a project changes only root lockfile metadata. Verify every package
+  # integrity before reusing the installed-image cache in that case. npm ci still
+  # verifies the project's unchanged lockfile; a missing cache entry may fetch.
+  seed_packages_match=0
+  if [[ -f /opt/codex/sites-vinext-cache-source/package-lock.json ]]; then
+    if node --input-type=module - "${SITES_PROJECT_ROOT}/package-lock.json" /opt/codex/sites-vinext-cache-source/package-lock.json <<'NODE'
+import { readFileSync } from 'node:fs';
+const project = JSON.parse(readFileSync(process.argv[2], 'utf8')).packages;
+const seed = JSON.parse(readFileSync(process.argv[3], 'utf8')).packages;
+process.exit(Object.entries(project).every(([path, entry]) => !path || (entry.version === seed[path]?.version && (entry.integrity ? entry.integrity === seed[path]?.integrity : entry.inBundle && JSON.stringify(entry) === JSON.stringify(seed[path])))) ? 0 : 1);
+NODE
+    then seed_packages_match=1; fi
+  fi
+  if [[ "${seed_lockfile_sha256}" == "${lockfile_sha256}" || "${seed_packages_match}" == "1" ]]; then
     echo "[sites] restoring image-seeded npm cache"
     cp -a "${seed_cache}/." "${expected_cache}/"
     use_seeded_cache=1

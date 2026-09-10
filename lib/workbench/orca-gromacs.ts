@@ -1,8 +1,10 @@
 import type { Molecule, RDFDataset, RunRecord } from "./types"
+import { canonical,sha256 as sourceSha256 } from "./identity.ts"
+import { FORCE_FIELD, CHARGE_SOURCE, FORCE_FIELD_INCLUDE } from "./version.ts"
 
 export type PrepSeverity = "ERROR" | "WARNING" | "INFO"
 export type PrepDiagnostic = { severity: PrepSeverity; code: string; message: string }
-export type StepStatus = "PASS" | "WARNING" | "FAIL" | "WAITING" | "NOT RUN"
+export type StepStatus = "PASS" | "WARNING" | "FAIL" | "WAITING" | "NOT RUN" | "RESEARCHER ACCEPTED" | "AUTOMATICALLY VERIFIED"
 
 export type SourceFileRecord = {
   name: string
@@ -44,6 +46,7 @@ export type BondRecord = {
 }
 
 export type TopologySection = { name: string; lines: string[] }
+const PARAMETER_SECTIONS = new Set(["atomtypes", "bondtypes", "pairtypes", "angletypes", "dihedraltypes", "constrainttypes", "nonbond_params", "cmaptypes", "implicit_genborn_params"])
 
 export type MoleculePreparation = {
   moleculeId: string
@@ -63,6 +66,7 @@ export type MoleculePreparation = {
   connectivityApproved: boolean
   coordinateSettings: { center: boolean; translateAngstrom: { x: number; y: number; z: number } }
   orcaMetadata: { inputLine: string; method: string; basis: string; parsedTotalCharge: number | null; terminatedNormally: boolean }
+  originalTopologyFile?: SourceFileRecord
   topologyFileName: string
   topologyText: string
   topologySections: TopologySection[]
@@ -92,6 +96,7 @@ export type PackedSystemRecord = {
 }
 
 export type ExecutionStatus = {
+  history?: Array<{id:string;projectId:string;stage:string;classification:string;rationale:string;timestamp:string;softwareVersion:string;actor:"researcher"}>
   em: "not-run" | "failed" | "accepted"
   nvt: "not-run" | "failed" | "accepted"
   npt: "not-run" | "failed" | "accepted"
@@ -99,6 +104,7 @@ export type ExecutionStatus = {
 }
 
 export type OrcaGromacsState = {
+  projectId?: string
   schemaVersion: "0.1"
   tutorialMode: boolean
   selectedMoleculeId: string
@@ -163,9 +169,10 @@ const csvCell = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""'
 const csv = (rows: unknown[][]) => rows.map((row) => row.map(csvCell).join(",")).join("\n")
 
 export async function sourceFileRecord(file: File): Promise<SourceFileRecord> {
-  const text = await file.text()
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))
-  const sha256 = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("")
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+  if (new TextEncoder().encode(text).length !== bytes.length) throw new Error("Source encoding cannot be preserved; supply UTF-8 text without byte-order mark.")
+  const sha256 = await sourceSha256(text)
   return { name: file.name, text, size: file.size, lastModified: file.lastModified, sha256, importedAt: new Date().toISOString() }
 }
 
@@ -186,15 +193,15 @@ export function parseXyz(text: string) {
   return { atomCount, comment, atoms }
 }
 
-function lastSectionLines(text: string, heading: RegExp, limit = 600) {
+function lastSectionLines(text: string, heading: RegExp) {
   const lines = text.split(/\r?\n/)
   let start = -1
   for (let i = 0; i < lines.length; i++) if (heading.test(lines[i])) start = i
-  return start < 0 ? [] : lines.slice(start + 1, start + 1 + limit)
+  return start < 0 ? [] : lines.slice(start + 1)
 }
 
 export function parseOrcaOutput(text: string) {
-  const chargeLines = lastSectionLines(text, /MULLIKEN\s+ATOMIC\s+CHARGES/i, 400)
+  const chargeLines = lastSectionLines(text, /MULLIKEN\s+ATOMIC\s+CHARGES/i)
   const charges: OrcaCharge[] = []
   for (const line of chargeLines) {
     const match = line.match(/^\s*(\d+)\s+([A-Za-z]{1,3})\s*:\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+)?)\b/)
@@ -202,18 +209,18 @@ export function parseOrcaOutput(text: string) {
     else if (charges.length && /Sum\s+of\s+atomic\s+charges|MULLIKEN\s+REDUCED/i.test(line)) break
   }
 
-  const coordinateLines = lastSectionLines(text, /CARTESIAN\s+COORDINATES\s*\(ANGSTROE?M\)/i, 500)
+  const coordinateLines = lastSectionLines(text, /CARTESIAN\s+COORDINATES\s*\(ANGSTROE?M\)/i)
   const outCoordinates: CoordinateAtom[] = []
   for (const line of coordinateLines) {
     const match = line.match(/^\s*([A-Za-z]{1,3})\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+)?)\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+)?)\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+)?)/)
     if (match) outCoordinates.push({ index: outCoordinates.length + 1, element: cleanElement(match[1]), x: Number(match[2].replace(/[Dd]/, "E")), y: Number(match[3].replace(/[Dd]/, "E")), z: Number(match[4].replace(/[Dd]/, "E")) })
-    else if (outCoordinates.length && !line.trim()) break
+    else if (outCoordinates.length) break
   }
 
-  const inputLines = text.split(/\r?\n/).filter((line) => /^\s*!/.test(line)).map((line) => line.trim())
+  const inputLines = text.split(/\r?\n/).filter((line) => /^\s*(?:\|\s*\d+>\s*)?!/.test(line)).map((line) => line.trim())
   const inputLine = inputLines.at(-1) ?? ""
-  const method = /\bBP86\b/i.test(text) ? "BP86" : "not detected"
-  const basis = /\bdef2[-–]?TZVP\b/i.test(text) ? "def2-TZVP" : "not detected"
+  const method = /\bBP86\b/i.test(inputLine) ? "BP86" : "not detected"
+  const basis = /\bdef2[-–]?TZVP\b/i.test(inputLine) ? "def2-TZVP" : "not detected"
   const xyzCharge = [...text.matchAll(/\*\s*xyz(?:file)?\s+(-?\d+)\s+\d+/gi)].at(-1)
   const totalChargeLine = [...text.matchAll(/Total\s+Charge[^\n]*?(-?\d+)\s*$/gim)].at(-1)
   const parsedTotalCharge = xyzCharge ? Number(xyzCharge[1]) : totalChargeLine ? Number(totalChargeLine[1]) : null
@@ -232,7 +239,7 @@ export const GROMACS_STAGE_COMMANDS = {
   em: "#!/usr/bin/env bash\nset -euo pipefail\ngmx grompp -f 01_em/em.mdp -c 00_input/packed.gro -p 00_input/topol.top -n 00_input/index.ndx -o 01_em/em.tpr -maxwarn 0\ngmx mdrun -deffnm 01_em/em -v",
   nvt: "#!/usr/bin/env bash\nset -euo pipefail\ngmx grompp -f 02_nvt/nvt.mdp -c 01_em/em.gro -r 01_em/em.gro -p 00_input/topol.top -n 00_input/index.ndx -o 02_nvt/nvt.tpr -maxwarn 0\ngmx mdrun -deffnm 02_nvt/nvt -v",
   npt: "#!/usr/bin/env bash\nset -euo pipefail\ngmx grompp -f 03_npt/npt.mdp -c 02_nvt/nvt.gro -t 02_nvt/nvt.cpt -p 00_input/topol.top -n 00_input/index.ndx -o 03_npt/npt.tpr -maxwarn 0\ngmx mdrun -deffnm 03_npt/npt -v\nprintf 'Density\\n0\\n' | gmx energy -f 03_npt/npt.edr -o 03_npt/density.xvg",
-  production: "#!/usr/bin/env bash\nset -euo pipefail\ngmx grompp -f 04_prod/prod.mdp -c 03_npt/npt.gro -t 03_npt/npt.cpt -p 00_input/topol.top -n 00_input/index.ndx -o 04_prod/prod.tpr -maxwarn 0\ngmx mdrun -deffnm 04_prod/prod -cpi 04_prod/prod.cpt -append",
+  production: "#!/usr/bin/env bash\nset -euo pipefail\ngmx grompp -f 04_prod/prod.mdp -c 03_npt/npt.gro -t 03_npt/npt.cpt -p 00_input/topol.top -n 00_input/index.ndx -o 04_prod/prod.tpr -maxwarn 0\ngmx mdrun -deffnm 04_prod/prod\n# Restart after interruption only: gmx mdrun -deffnm 04_prod/prod -cpi 04_prod/prod.cpt -append",
 } as const
 
 export function commandText(state: OrcaGromacsState, key: string, generated: string) {
@@ -240,8 +247,7 @@ export function commandText(state: OrcaGromacsState, key: string, generated: str
 }
 
 export function thesisResidueName(molecule: Molecule) {
-  const fixed: Record<string, string> = { thymol: "THY", dodecanol: "DOD", "butanediol-23": "BD23", "lauric-acid": "LAU", "octanoic-acid": "OCT", "geranyl-acetate": "GA", geraniol: "GER", limonene: "LIM" }
-  return (fixed[molecule.id] ?? molecule.residueName ?? molecule.abbreviation ?? "MOL").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "MOL"
+  return (molecule.residueName || molecule.abbreviation || "MOL").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "MOL"
 }
 
 export function emptyMoleculePreparation(molecule: Molecule): MoleculePreparation {
@@ -302,12 +308,12 @@ export function reconcilePreparation(preparation: MoleculePreparation): Molecule
 
 export function attachXyz(preparation: MoleculePreparation, file: SourceFileRecord) {
   const parsed = parseXyz(file.text)
-  return reconcilePreparation({ ...preparation, xyzFile: file, xyzComment: parsed.comment, xyzAtoms: parsed.atoms, bonds: [], connectivityApproved: false, geometryAcknowledged: false })
+  return reconcilePreparation({ ...preparation, xyzFile: file, atoms: [], topologyText: "", topologySections: [], topologyReviewed: false, gromppValidated: false, xyzComment: parsed.comment, xyzAtoms: parsed.atoms, bonds: [], connectivityApproved: false, geometryAcknowledged: false })
 }
 
 export function attachOrcaOutput(preparation: MoleculePreparation, file: SourceFileRecord) {
   const parsed = parseOrcaOutput(file.text)
-  return reconcilePreparation({ ...preparation, outFile: file, outCoordinates: parsed.outCoordinates, outCharges: parsed.charges, orcaMetadata: parsed.metadata, chargeAcknowledged: false, geometryAcknowledged: false })
+  return reconcilePreparation({ ...preparation, outFile: file, topologyReviewed: false, gromppValidated: false, outCoordinates: parsed.outCoordinates, outCharges: parsed.charges, orcaMetadata: parsed.metadata, chargeAcknowledged: false, geometryAcknowledged: false })
 }
 
 export function mappedChargeSum(preparation: MoleculePreparation) {
@@ -409,7 +415,7 @@ export function importTopology(preparation: MoleculePreparation, file: SourceFil
     if (atomI && atomJ) bonds.push({ id: `top-${index + 1}-${ai}-${aj}`, ai, aj, elementI: atomI.element, elementJ: atomJ.element, distanceAngstrom: distance(atomI, atomJ), definition: fields.slice(2).join(" ") || "function/parameters not supplied", proposed: false, accepted: true, source: "topology-import" })
     return bonds
   }, [])
-  return { ...preparation, topologyFileName: file.name, topologyText: file.text, topologySections: sections, atoms, bonds: importedBonds.length ? importedBonds : preparation.bonds, connectivityApproved: importedBonds.length ? false : preparation.connectivityApproved, topologyReviewed: false, gromppValidated: false, updatedAt: new Date().toISOString() }
+  return { ...preparation, originalTopologyFile: preparation.originalTopologyFile ?? file, topologyFileName: file.name, topologyText: file.text, topologySections: sections, atoms, bonds: importedBonds.length ? importedBonds : preparation.bonds, connectivityApproved: importedBonds.length ? false : preparation.connectivityApproved, topologyReviewed: false, gromppValidated: false, updatedAt: new Date().toISOString() }
 }
 
 export function applyEditedTopology(preparation: MoleculePreparation, text: string) {
@@ -419,6 +425,9 @@ export function applyEditedTopology(preparation: MoleculePreparation, text: stri
 
 export function topologyDiagnostics(preparation: MoleculePreparation): PrepDiagnostic[] {
   const diagnostics = [...orcaDiagnostics(preparation)]
+  if(canonical(parseTopologySections(preparation.topologyText))!==canonical(preparation.topologySections))diagnostics.push({severity:"ERROR",code:"TOPOLOGY_TEXT_NOT_PARSED",message:"Re-parse the edited topology before generation."})
+  if(preparation.atoms.some(a=>!Number.isFinite(a.mass)||!(a.mass!>0)||a.finalCharge!==a.mullikenCharge))diagnostics.push({severity:"ERROR",code:"MASS_CHARGE_CONFLICT",message:"Positive masses and exact mapped ORCA Mulliken final charges are required."})
+  if(!/^[A-Za-z][A-Za-z0-9]{0,3}$/.test(preparation.residueName))diagnostics.push({severity:"ERROR",code:"RESIDUE_NAME_INVALID",message:"Use a unique residue name with 1–4 alphanumeric characters, beginning with a letter."})
   const atomIndices = preparation.atoms.map((atom) => atom.index)
   if (new Set(atomIndices).size !== atomIndices.length) diagnostics.push({ severity: "ERROR", code: "DUPLICATE_ATOM_INDEX", message: "Molecular atom indices must be unique." })
   const atomNames = preparation.atoms.map((atom) => atom.gromacsName.trim()).filter(Boolean)
@@ -461,7 +470,7 @@ export function topologyDiagnostics(preparation: MoleculePreparation): PrepDiagn
     for (const [lineIndex, line] of lines.entries()) {
       const fields = line.split(/\s+/)
       const indices = fields.slice(0, arity).map(Number)
-      if (fields.length < arity || indices.some((index) => !Number.isInteger(index))) diagnostics.push({ severity: "ERROR", code: `MALFORMED_${sectionName.toUpperCase()}_RECORD`, message: `Malformed [ ${sectionName} ] record ${lineIndex + 1}: ${line}` })
+      if (fields.length < arity+1 || !Number.isInteger(Number(fields[arity])) || Number(fields[arity])<1 || indices.some((index) => !Number.isInteger(index))) diagnostics.push({ severity: "ERROR", code: `MALFORMED_${sectionName.toUpperCase()}_RECORD`, message: `Malformed [ ${sectionName} ] record ${lineIndex + 1}: ${line}` })
       else if (indices.some((index) => !atomIndices.includes(index))) diagnostics.push({ severity: "ERROR", code: `UNDEFINED_${sectionName.toUpperCase()}_ATOM`, message: `[ ${sectionName} ] record ${lineIndex + 1} references an undefined atom index: ${line}` })
     }
   }
@@ -470,6 +479,10 @@ export function topologyDiagnostics(preparation: MoleculePreparation): PrepDiagn
   validateInteraction("dihedrals", 4)
   const topologyBondKeys = preparation.topologySections.filter((section) => section.name === "bonds").flatMap(dataLines).map((line) => line.split(/\s+/).slice(0, 2).map(Number)).filter((pair) => pair.every(Number.isInteger)).map(([a, b]) => [Math.min(a, b), Math.max(a, b)].join("-"))
   if (new Set(topologyBondKeys).size !== topologyBondKeys.length) diagnostics.push({ severity: "ERROR", code: "DUPLICATE_BOND_DEFINITION", message: "Imported [ bonds ] contains a duplicated atom pair." })
+  const acceptedBonds=preparation.bonds.filter(b=>b.accepted).map(b=>[Math.min(b.ai,b.aj),Math.max(b.ai,b.aj)].join("-")).sort()
+  if(canonical(acceptedBonds)!==canonical([...topologyBondKeys].sort()))diagnostics.push({severity:"ERROR",code:"CONNECTIVITY_TOPOLOGY_CONFLICT",message:"Accepted bond graph differs from imported bonded topology."})
+  if(/^\s*#\s*include/m.test(preparation.topologyText))diagnostics.push({severity:"ERROR",code:"UNRESOLVED_TOPOLOGY_INCLUDE",message:"Inline and review per-molecule include dependencies before export; external includes are not silently discarded."})
+  if(/^\s*#\s*(?:if|else|endif|define|undef)/m.test(preparation.topologyText))diagnostics.push({severity:"ERROR",code:"UNRESOLVED_TOPOLOGY_PREPROCESSOR",message:"Resolve imported conditional/macro definitions into an unconditional reviewed topology before merging. The original file remains preserved; the importer does not evaluate a force-field preprocessor."})
   const atomTypeDefinitions = preparation.topologySections.filter((section) => section.name === "atomtypes").flatMap(dataLines).map((line) => line.split(/\s+/)[0]).filter(Boolean)
   if (new Set(atomTypeDefinitions).size !== atomTypeDefinitions.length) diagnostics.push({ severity: "ERROR", code: "DUPLICATE_ATOMTYPE_DEFINITION", message: "Imported [ atomtypes ] contains duplicate type names." })
   if (preparation.atoms.length >= 3 && preparation.topologyText && !sectionNames.has("angles")) diagnostics.push({ severity: "WARNING", code: "ANGLES_MISSING", message: "No [ angles ] section was found. Confirm whether angle parameters are generated through another included definition." })
@@ -484,7 +497,7 @@ export function preparationStatus(preparation: MoleculePreparation) {
   const diagnostics = topologyDiagnostics(preparation)
   if (diagnostics.some((item) => item.severity === "ERROR")) return "INCOMPLETE — NOT READY FOR PRODUCTION MD"
   if (!preparation.gromppValidated) return "READY FOR GROMPP VALIDATION"
-  return "VALIDATED FOR THE RECORDED GROMPP INPUT"
+  return "RESEARCHER ACCEPTED — EXTERNAL GROMPP REPORTED"
 }
 
 function transformedCoordinates(preparation: MoleculePreparation) {
@@ -504,7 +517,10 @@ export function generatePdb(preparation: MoleculePreparation) {
     const name = atom.gromacsName.slice(0, 4).padStart(4)
     const residue = preparation.residueName.slice(0, 4).padStart(4)
     const x = atom.x.toFixed(3).padStart(8), y = atom.y.toFixed(3).padStart(8), z = atom.z.toFixed(3).padStart(8)
-    return `HETATM${serial} ${name} ${residue} A${String(1).padStart(4)}    ${x}${y}${z}  1.00  0.00          ${atom.element.padStart(2)}`
+    // Fixed PDB columns: name 13–16, four-character residue 18–21,
+    // chain 22, residue number 23–26, x/y/z 31–54. Do not add a
+    // separator before the chain: it shifts every coordinate column.
+    return `HETATM${serial} ${name} ${residue}A${String(1).padStart(4)}    ${x}${y}${z}  1.00  0.00          ${atom.element.padStart(2)}`
   })
   return [`REMARK Generated without atom reordering from ORCA XYZ; coordinates in Angstrom`, ...lines, "TER", "END", ""].join("\n")
 }
@@ -524,28 +540,22 @@ export function generateChargesCsv(preparation: MoleculePreparation) {
 }
 
 export function generateItp(preparation: MoleculePreparation) {
-  const status = preparationStatus(preparation)
-  const header = [`; SolvForge MD molecular topology`, `; STATUS: ${status}`, `; Force-field framework: OPLS-AA`, `; Final per-atom charges: raw ORCA BP86/def2-TZVP Mulliken charges`, `; Atom order preserved from ORCA XYZ. No charge normalization or redistribution was applied.`, ""]
-  const moleculeName = preparation.residueName.replace(/[^A-Za-z0-9_]/g, "_") || "MOL"
-  const atomLines = preparation.atoms.map((atom) => {
-    const type = atom.oplsType || "UNMAPPED"
-    const charge = atom.finalCharge === null ? "MISSING_CHARGE" : atom.finalCharge.toFixed(8)
-    const mass = atom.mass === null ? "MISSING_MASS" : atom.mass.toFixed(5)
-    return `${String(atom.index).padStart(5)} ${type.padEnd(14)} 1 ${moleculeName.padEnd(5)} ${atom.gromacsName.padEnd(5)} ${String(atom.index).padStart(5)} ${charge.padStart(14)} ${mass.padStart(10)} ; ORCA index ${atom.index}`
-  })
-  const output = [...header, "[ moleculetype ]", "; name  nrexcl", `${moleculeName} 3`, "", "[ atoms ]", "; nr type resnr residue atom cgnr charge mass", ...atomLines, ""]
-  const allowed = ["bonds", "pairs", "pairs_nb", "angles", "dihedrals", "constraints", "settles", "exclusions", "position_restraints"]
-  const imported = new Map(preparation.topologySections.map((section) => [section.name, section]))
-  let copied = false
-  for (const sectionName of allowed) {
-    const section = imported.get(sectionName)
-    if (!section) continue
-    output.push(`[ ${sectionName} ]`, ...section.lines, "")
-    copied = true
-  }
-  if (!copied && preparation.bonds.length) {
-    output.push("[ bonds ]", "; Connectivity-only draft. Function/parameters require OPLS-AA mapping or imported x2top output.", ...preparation.bonds.filter((bond) => bond.accepted).map((bond) => `${bond.ai} ${bond.aj} 1 ; UNVALIDATED_PARAMETER_LOOKUP`), "")
-  }
+  const errors=topologyDiagnostics(preparation).filter(d=>d.severity==="ERROR")
+  if(errors.length)return "; INCOMPLETE — NOT READY FOR PRODUCTION MD\n"+errors.map(e=>"; "+e.code+": "+e.message).join("\n")+"\n"
+  const moleculeName=preparation.residueName
+  const nrexcl=dataLines(preparation.topologySections.find(s=>s.name==="moleculetype"))[0]?.split(/\s+/)[1]
+  if(!nrexcl||!Number.isSafeInteger(Number(nrexcl))||Number(nrexcl)<0)throw new Error("Valid imported nrexcl is required; no default is invented.")
+  const header=["; SolvForge MD: OPLS-AA framework; raw ORCA BP86/def2-TZVP Mulliken charges","; Status: "+preparationStatus(preparation),"; Atom order unchanged; source and final charges in atom_mapping.csv.",""]
+  const parameters=PARAMETER_SECTIONS
+  // GROMACS requires the parameter level before every molecule definition.
+  // The system topology hoists these exact source sections once. The guard
+  // also retains parameters when this molecule is exported on its own.
+  // https://manual.gromacs.org/documentation/current/reference-manual/topologies/topology-file-formats.html
+  const definitions=preparation.topologySections.filter(s=>parameters.has(s.name)).sort((a,b)=>Number(b.name==="atomtypes")-Number(a.name==="atomtypes"))
+  const output=[...header,...(definitions.length?["#ifndef SOLVFORGE_SYSTEM_PARAMETERS",...definitions.flatMap(s=>["[ "+s.name+" ]",...s.lines,""]),"#endif",""]:[]),"[ moleculetype ]",moleculeName+" "+nrexcl,"","[ atoms ]","; nr type resnr residue atom cgnr charge mass",...preparation.atoms.map(a=>[a.index,a.oplsType,1,moleculeName,a.gromacsName,a.index,a.finalCharge!.toPrecision(15),a.mass].join(" ")),""]
+  // Preserve all interaction sections in order, including repeated proper/improper dihedral sections.
+  const omit=new Set(["defaults","system","molecules","moleculetype","atoms",...parameters])
+  for(const section of preparation.topologySections)if(!omit.has(section.name))output.push("[ "+section.name+" ]",...section.lines,"")
   return output.join("\n")
 }
 
@@ -555,7 +565,7 @@ export function x2topCommand(preparation: MoleculePreparation) {
 }
 
 export function runSpecies(run: RunRecord) {
-  return [...run.components.map((component) => ({ moleculeId: component.moleculeId, name: component.name, count: component.count })), { moleculeId: run.soluteId, name: run.soluteName, count: run.soluteCount }]
+  return [...run.components.map((component) => ({ moleculeId: component.moleculeId, name: component.name, count: component.count })), ...(run.systemKind==="pure-des"?[]:[{ moleculeId: run.soluteId, name: run.soluteName, count: run.soluteCount }])]
 }
 
 export function runBoxAngstrom(run: RunRecord) {
@@ -565,7 +575,8 @@ export function runBoxAngstrom(run: RunRecord) {
 
 export function generatePackmolInput(run: RunRecord, preparations: Record<string, MoleculePreparation>, settings: OrcaGromacsState["packmol"]) {
   const box = runBoxAngstrom(run)
-  const margin = Math.max(0, settings.marginAngstrom)
+  const margin = settings.marginAngstrom
+  if(!Number.isFinite(margin)||margin<0||Object.values(box).some(v=>v<=2*margin)||!Number.isFinite(settings.toleranceAngstrom)||settings.toleranceAngstrom<=0)return "# ERROR: positive box and packing tolerance, and margins smaller than half each dimension required.\n"
   const lines = [`# Counts copied from run ${run.runId}; dimensions and all packing coordinates are in Angstrom.`, `tolerance ${settings.toleranceAngstrom.toFixed(3)}`, "filetype pdb", "output packed.pdb"]
   if (settings.periodic) lines.push(`pbc 0.000 0.000 0.000 ${box.x.toFixed(3)} ${box.y.toFixed(3)} ${box.z.toFixed(3)}`)
   for (const species of runSpecies(run)) {
@@ -611,6 +622,8 @@ export function validatePackedSystem(run: RunRecord, packed: PackedSystemRecord 
   if (new Set(preparedResidues).size !== preparedResidues.length) diagnostics.push({ severity: "ERROR", code: "DUPLICATE_RESIDUE_NAME", message: "Every species in a packed system needs a unique residue name for unambiguous topology and analysis mapping." })
   const serials = packed.atoms.map((atom) => atom.serial)
   if (new Set(serials).size !== serials.length) diagnostics.push({ severity: "ERROR", code: "DUPLICATE_PACKED_ATOM_SERIAL", message: "packed.pdb contains duplicate atom serial numbers." })
+  let offset=0
+  for(const species of runSpecies(run)){const p=preparations[species.moleculeId];if(!p||species.count===null)continue;for(let m=0;m<species.count;m++){for(const a of p.atoms){const actual=packed.atoms[offset++];if(!actual||actual.residueName!==p.residueName||actual.atomName!==a.gromacsName||actual.element!==a.element){diagnostics.push({severity:"ERROR",code:"GLOBAL_MOLECULE_ORDER_MISMATCH",message:"Packed atom/species order differs from the ordered [ molecules ] composition."});break}}}}
   let expectedTotalAtoms = 0
   for (const species of runSpecies(run)) {
     const prep = preparations[species.moleculeId]
@@ -647,11 +660,32 @@ export function generatePackedGro(run: RunRecord, packed: PackedSystemRecord) {
   return [`${run.runId} packed by Packmol; Angstrom converted to nm`, String(lines.length), ...lines, `${(box.x / 10).toFixed(5).padStart(10)}${(box.y / 10).toFixed(5).padStart(10)}${(box.z / 10).toFixed(5).padStart(10)}`, ""].join("\n")
 }
 
+export function systemTopologyDiagnostics(run: RunRecord, preparations: Record<string, MoleculePreparation>): PrepDiagnostic[] {
+  const findings: PrepDiagnostic[] = [], types = new Set<string>()
+  for(const species of runSpecies(run)){
+    const prep=preparations[species.moleculeId]
+    if(!Number.isSafeInteger(species.count)||Number(species.count)<1)findings.push({severity:"ERROR",code:"SYSTEM_COUNT_UNRESOLVED",message:species.name+": positive integer count required."})
+    if(!prep){findings.push({severity:"ERROR",code:"SYSTEM_PREPARATION_MISSING",message:species.name+": molecular preparation missing."});continue}
+    findings.push(...topologyDiagnostics(prep).map(d=>({...d,message:species.name+": "+d.message})))
+    for(const s of prep.topologySections.filter(s=>s.name==="atomtypes"))for(const line of dataLines(s)){
+      const id=line.split(/\s+/)[0]
+      if(types.has(id))findings.push({severity:"ERROR",code:"DUPLICATE_SYSTEM_ATOMTYPE",message:"Duplicate atom type definition across molecular parameter sources: "+id+". Resolve shared definitions before export."})
+      types.add(id)
+    }
+  }
+  return findings
+}
+
 export function generateTopolTop(run: RunRecord, preparations: Record<string, MoleculePreparation>, includeRoot = "") {
+  if(run.forceField!==FORCE_FIELD||run.chargeScheme!==CHARGE_SOURCE||run.resolvedProtocol?.topologyInclude!==FORCE_FIELD_INCLUDE)throw new Error("Force-field/charge provenance conflicts with supported generated topology.")
   const species = runSpecies(run)
-  const ready = species.every((item) => preparations[item.moleculeId] && preparationStatus(preparations[item.moleculeId]).startsWith("VALIDATED") && Number.isInteger(item.count) && Number(item.count) >= 0)
+  const ready = !systemTopologyDiagnostics(run,preparations).some(d=>d.severity==="ERROR")
+  const externallyReviewed = ready && species.every(item=>preparations[item.moleculeId].gromppValidated)
+  // Hoist all atom types first, then the remaining source parameter sections,
+  // before any .itp introduces [ moleculetype ]. Do not invent parameters.
+  const parameters=species.flatMap(item=>(preparations[item.moleculeId]?.topologySections??[]).filter(s=>PARAMETER_SECTIONS.has(s.name)).map(s=>({...s,source:item.moleculeId}))).sort((a,b)=>Number(b.name==="atomtypes")-Number(a.name==="atomtypes"))
   const includePath = (id: string) => includeRoot ? `${includeRoot}/${slug(id)}/topology/${slug(id)}.itp` : `${slug(id)}.itp`
-  return [`; System topology for ${run.runId}`, `; STATUS: ${ready ? "MOLECULAR TOPOLOGIES VALIDATED FOR RECORDED GROMPP INPUT" : "INCOMPLETE — DO NOT USE FOR PRODUCTION MD"}`, `; Coordinate counts must match [ molecules ]; validate packed.pdb before grompp.`, `#include "oplsaa.ff/forcefield.itp"`, "", ...species.map((item) => `#include "${includePath(item.moleculeId)}"`), "", "[ system ]", `${run.desName} + ${run.soluteName}`, "", "[ molecules ]", "; Moleculetype  count", ...species.map((item) => `${(preparations[item.moleculeId]?.residueName ?? "UNRESOLVED").padEnd(14)} ${Number.isInteger(item.count) ? item.count : "UNRESOLVED"}`), ""].join("\n")
+  return [`; System topology for ${run.runId}`, `; STATUS: ${ready ? (externallyReviewed ? "RESEARCHER ACCEPTED — EXTERNAL GROMPP REPORTED" : "READY FOR GROMPP VALIDATION — NOT YET PRODUCTION VALIDATED") : "INCOMPLETE — DO NOT USE FOR PRODUCTION MD"}`, `; Coordinate counts must match [ molecules ]; validate packed.pdb before grompp.`, `#include "oplsaa.ff/forcefield.itp"`, "", ...parameters.flatMap(s=>["; Parameter source: "+s.source,"[ "+s.name+" ]",...s.lines,""]),"#define SOLVFORGE_SYSTEM_PARAMETERS",...species.map((item) => `#include "${includePath(item.moleculeId)}"`), "#undef SOLVFORGE_SYSTEM_PARAMETERS", "", "[ system ]", `${run.systemKind === "pure-des" ? run.desName : run.desName+" + "+run.soluteName}`, "", "[ molecules ]", "; Moleculetype  count", ...species.map((item) => `${(preparations[item.moleculeId]?.residueName ?? "UNRESOLVED").padEnd(14)} ${Number.isInteger(item.count) ? item.count : "UNRESOLVED"}`), ""].join("\n")
 }
 
 export function generateIndexNdx(packed: PackedSystemRecord, run: RunRecord, preparations: Record<string, MoleculePreparation>) {
@@ -679,46 +713,36 @@ function rdfSelection(label: string, mode: OrcaGromacsState["rdf"]["mode"], cust
   if (mode === "center-of-mass") return `res_com of resname ${label}`
   return `resname ${label}`
 }
+const shellQuote=(text:string)=>"'"+text.replaceAll("'", "'\"'\"'")+"'"
+export function rdfCommandDiagnostics(run:RunRecord,preparations:Record<string,MoleculePreparation>,settings:OrcaGromacsState["rdf"]){
+ const errors:string[]=[]
+ if(!["center-of-mass","atom-based","custom"].includes(settings.mode))errors.push("Unknown RDF definition.")
+ if(!Number.isFinite(settings.binWidthNm)||settings.binWidthNm<=0||!Number.isFinite(settings.rmaxNm)||settings.rmaxNm<=settings.binWidthNm)errors.push("RDF requires 0 < bin width < maximum radius in nm.")
+ const maximum=run.resolvedProtocol?.production?.maximumNs??run.productionNs
+ if(!Number.isFinite(settings.beginNs)||!Number.isFinite(settings.endNs)||settings.beginNs<0||settings.endNs<=settings.beginNs||settings.endNs>maximum)errors.push("RDF window must be finite, nonnegative, increasing and within the resolved production maximum.")
+ for(const species of runSpecies(run)){const residue=preparations[species.moleculeId]?.residueName;if(!residue||!/^\w{1,4}$/.test(residue))errors.push(species.name+": a mapped residue name is required.");else if(settings.mode==="custom"&&(!settings.customSelections[residue]?.trim()||/[\r\n]/.test(settings.customSelections[residue])))errors.push(residue+": supply an explicit single-line custom GROMACS selection.")}
+ return errors
+}
 
 export function generateRdfCommands(run: RunRecord, preparations: Record<string, MoleculePreparation>, settings: OrcaGromacsState["rdf"]) {
-  const pairCommands = pairwiseSpecies(run, preparations).map(({ a, b }) => `gmx rdf -f 04_prod/prod.xtc -s 04_prod/prod.tpr -n 00_input/index.ndx -ref '${rdfSelection(a, settings.mode, settings.customSelections)}' -sel '${rdfSelection(b, settings.mode, settings.customSelections)}' -bin ${settings.binWidthNm} -rmax ${settings.rmaxNm} -b ${settings.beginNs * 1000} -e ${settings.endNs * 1000} -o analysis/rdf/rdf_${a}_${b}.xvg`)
+  const errors=rdfCommandDiagnostics(run,preparations,settings);if(errors.length)return errors.map(e=>"# ERROR: "+e).join("\n")+"\n"
+  const pairCommands = pairwiseSpecies(run, preparations).map(({ a, b }) => `gmx rdf -f 04_prod/prod.xtc -s 04_prod/prod.tpr -n 00_input/index.ndx -ref ${shellQuote(rdfSelection(a, settings.mode, settings.customSelections))} -sel ${shellQuote(rdfSelection(b, settings.mode, settings.customSelections))} -bin ${settings.binWidthNm} -rmax ${settings.rmaxNm} -b ${settings.beginNs * 1000} -e ${settings.endNs * 1000} -o analysis/rdf/rdf_${a}_${b}.xvg`)
   return `#!/usr/bin/env bash\nset -euo pipefail\n# ${settings.mode}; times converted from ns in the Workbench to ps for GROMACS.\n${pairCommands.join("\n")}\n`
 }
 
 export function parseBlocks(value: string) {
-  return value.split(/[,;\n]+/).map((part) => part.trim().match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*[-–:]\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))$/)).filter((match): match is RegExpMatchArray => Boolean(match)).map((match) => ({ startNs: Number(match[1]), endNs: Number(match[2]) })).filter((block) => block.startNs >= 0 && block.endNs > block.startNs)
+  if(!value.trim())throw new Error("Supply at least one explicit time block.")
+  return value.split(/[,;\n]+/).filter(p=>p.trim()).map(part=>{const m=part.trim().match(/^(\d+(?:\.\d*)?|\.\d+)\s*[-–:]\s*(\d+(?:\.\d*)?|\.\d+)$/);if(!m||!Number.isFinite(Number(m[1]))||!Number.isFinite(Number(m[2]))||Number(m[2])<=Number(m[1]))throw new Error("Invalid block: "+part+". No windows are silently discarded.");return{startNs:Number(m[1]),endNs:Number(m[2])}})
 }
 
 export function generateBlockRdfCommands(run: RunRecord, preparations: Record<string, MoleculePreparation>, settings: OrcaGromacsState["rdf"]) {
+  const errors=rdfCommandDiagnostics(run,preparations,settings);if(errors.length)return errors.map(e=>"# ERROR: "+e).join("\n")+"\n"
+  let blocks:ReturnType<typeof parseBlocks>
+  try{blocks=parseBlocks(settings.blocks)}catch(e){return "# ERROR: "+String(e)+"\n"}
+  if(blocks.some(b=>b.endNs>(run.resolvedProtocol?.production?.maximumNs??run.productionNs)))return "# ERROR: Block exceeds the resolved production maximum.\n"
   const lines = ["#!/usr/bin/env bash", "set -euo pipefail", "# Block RDFs for time-convergence analysis; Workbench ns inputs are converted to GROMACS ps."]
-  for (const block of parseBlocks(settings.blocks)) for (const { a, b } of pairwiseSpecies(run, preparations)) lines.push(`gmx rdf -f 04_prod/prod.xtc -s 04_prod/prod.tpr -n 00_input/index.ndx -ref '${rdfSelection(a, settings.mode, settings.customSelections)}' -sel '${rdfSelection(b, settings.mode, settings.customSelections)}' -bin ${settings.binWidthNm} -rmax ${settings.rmaxNm} -b ${block.startNs * 1000} -e ${block.endNs * 1000} -o analysis/blocks/rdf_${a}_${b}_${block.startNs}-${block.endNs}ns.xvg`)
+  for (const block of blocks) for (const { a, b } of pairwiseSpecies(run, preparations)) lines.push(`gmx rdf -f 04_prod/prod.xtc -s 04_prod/prod.tpr -n 00_input/index.ndx -ref ${shellQuote(rdfSelection(a, settings.mode, settings.customSelections))} -sel ${shellQuote(rdfSelection(b, settings.mode, settings.customSelections))} -bin ${settings.binWidthNm} -rmax ${settings.rmaxNm} -b ${block.startNs * 1000} -e ${block.endNs * 1000} -o analysis/blocks/rdf_${a}_${b}_${block.startNs}-${block.endNs}ns.xvg`)
   return `${lines.join("\n")}\n`
-}
-
-export function generateSsmPreparationCommands(run: RunRecord, preparations: Record<string, MoleculePreparation>, state: OrcaGromacsState) {
-  const pairs = pairwiseSpecies(run, preparations)
-  const selected = state.ssm.pair ? pairs.find((pair) => `${pair.a}-${pair.b}` === state.ssm.pair) : pairs[0]
-  const pair = selected ?? pairs[0]
-  if (!pair) return "# No molecular pair is available.\n"
-  const sizes = state.ssm.sizesNm.split(/[,;\s]+/).map(Number).filter((value) => Number.isFinite(value) && value > 0)
-  const lines = ["#!/usr/bin/env bash", "set -euo pipefail", "# Each L directory must contain an independently prepared/validated finite-size trajectory.", "# This script does not claim that trajectory cropping creates a valid SSM ensemble."]
-  for (const size of sizes) lines.push(`gmx rdf -f analysis/ssm/L_${size}/prod.xtc -s analysis/ssm/L_${size}/prod.tpr -ref 'res_com of resname ${pair.a}' -sel 'res_com of resname ${pair.b}' -bin ${state.rdf.binWidthNm} -rmax ${Math.min(state.rdf.rmaxNm, size / 2)} -b ${state.ssm.beginNs * 1000} -e ${state.ssm.endNs * 1000} -o analysis/ssm/L_${size}/rdf_${pair.a}_${pair.b}.xvg`)
-  return `${lines.join("\n")}\n`
-}
-
-export function inferPairFromFilename(filename: string, run: RunRecord, preparations: Record<string, MoleculePreparation>) {
-  const upper = filename.toUpperCase()
-  return pairwiseSpecies(run, preparations).find((pair) => upper.includes(`${pair.a}_${pair.b}`.toUpperCase()) || upper.includes(`${pair.b}_${pair.a}`.toUpperCase())) ?? null
-}
-
-export function inferTrajectoryWindow(filename: string, fallback: { beginNs: number; endNs: number }) {
-  const match = filename.match(/_([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)ns(?:\.|_|$)/i)
-  return match && Number(match[2]) > Number(match[1]) ? { beginNs: Number(match[1]), endNs: Number(match[2]), inferredFromFilename: true } : { ...fallback, inferredFromFilename: false }
-}
-
-export function rdfDatasetMetadata(run: RunRecord, pair: { a: string; b: string }, state: OrcaGromacsState, filename = ""): RDFDataset["metadata"] {
-  const window = inferTrajectoryWindow(filename, { beginNs: state.rdf.beginNs, endNs: state.rdf.endNs })
-  return { runId: run.runId, desId: run.desId, concentrationId: run.concentrationLabel, speciesA: pair.a, speciesB: pair.b, temperatureK: run.temperatureK, pressureBar: run.pressureBar, soluteCount: run.soluteCount, composition: JSON.stringify(run.moleFractions ?? {}), boxDimensionsNm: `${run.box.x}×${run.box.y}×${run.box.z} ${run.box.unit ?? "nm"}`, replica: run.replica, trajectoryStartNs: window.beginNs, trajectoryEndNs: window.endNs, simulationDurationNs: run.productionNs, distanceUnit: "nm", forceField: run.forceField, chargeModel: run.chargeScheme, rdfSettings: JSON.stringify({ mode: state.rdf.mode, binWidthNm: state.rdf.binWidthNm, rmaxNm: state.rdf.rmaxNm }), softwareVersion: "1.0.0", notes: `Imported through ORCA→GROMACS wizard; pair inferred from deterministic filename and shown for researcher review.${window.inferredFromFilename ? " Trajectory block window inferred from the generated filename." : ""}` }
 }
 
 export function executionFor(state: OrcaGromacsState, runId: string): ExecutionStatus {
@@ -736,21 +760,21 @@ export function projectChecklist(run: RunRecord | undefined, state: OrcaGromacsS
   const rdf = datasets.filter((dataset) => dataset.metadata.runId === run.runId)
   const analyzed = rdf.filter((dataset) => dataset.analysis)
   return [
-    { label: "ORCA geometry imported", status: all((prep) => Boolean(prep.xyzFile && prep.xyzAtoms.length)) ? "PASS" : "WAITING", detail: `${preps.filter((prep) => prep.xyzFile).length}/${species.length} species` },
-    { label: "Mulliken charges parsed", status: all((prep) => prep.atoms.length > 0 && prep.atoms.every((atom) => atom.mullikenCharge !== null)) ? "PASS" : "WAITING", detail: "Raw charges are never normalized." },
-    { label: "Atom mapping", status: all((prep) => !orcaDiagnostics(prep).some((item) => item.severity === "ERROR")) ? "PASS" : "WAITING", detail: "XYZ ↔ ORCA output mapping" },
-    { label: "Connectivity approved", status: all((prep) => prep.connectivityApproved) ? "PASS" : "WAITING", detail: "Researcher-authoritative bond graph" },
-    { label: "OPLS-AA atom typing", status: all((prep) => prep.atoms.every((atom) => atom.oplsType && !["UNMAPPED", "REVIEW REQUIRED"].includes(atom.mappingStatus))) ? "PASS" : "WAITING", detail: "No fictional type assignment" },
-    { label: "Molecular topology", status: all((prep) => !topologyDiagnostics(prep).some((item) => item.severity === "ERROR")) ? "PASS" : "WAITING", detail: "Bonded framework + Mulliken merge" },
-    { label: "Molecular grompp validation", status: all((prep) => prep.gromppValidated) ? "PASS" : "WAITING", detail: "External GROMACS validation required" },
-    { label: "Box composition", status: run.compositionCalculation ? "PASS" : "WAITING", detail: run.compositionCalculation ? `${run.totalMoleculeCount} molecules` : "Density/manual counts required" },
-    { label: "Packed system validated", status: packed && !packedDiagnostics.some((item) => item.severity === "ERROR") ? "PASS" : "WAITING", detail: packed ? `${packed.atoms.length} atoms` : "Upload packed.pdb" },
-    { label: "EM", status: execution.em === "accepted" ? "PASS" : execution.em === "failed" ? "FAIL" : "NOT RUN", detail: "Maximum force and potential energy" },
-    { label: "NVT", status: execution.nvt === "accepted" ? "PASS" : execution.nvt === "failed" ? "FAIL" : "NOT RUN", detail: "Temperature stability" },
-    { label: "NPT", status: execution.npt === "accepted" ? "PASS" : execution.npt === "failed" ? "FAIL" : "NOT RUN", detail: "Density, pressure, and volume" },
-    { label: "Production", status: execution.production === "accepted" ? "PASS" : execution.production === "failed" ? "FAIL" : "NOT RUN", detail: "Equilibrium trajectory" },
-    { label: "RDF", status: rdf.length ? "PASS" : "NOT RUN", detail: `${rdf.length}/${pairwiseSpecies(run, state.molecules).length} pair dataset(s)` },
-    { label: "KBI", status: analyzed.length ? "PASS" : "NOT RUN", detail: `${analyzed.length} analyzed RDF series` },
+    { label: "ORCA geometry imported", status: all((prep) => Boolean(prep.xyzFile && prep.xyzAtoms.length)) ? "AUTOMATICALLY VERIFIED" : "WAITING", detail: `${preps.filter((prep) => prep.xyzFile).length}/${species.length} species` },
+    { label: "Mulliken charges parsed", status: all((prep) => prep.atoms.length > 0 && prep.atoms.every((atom) => atom.mullikenCharge !== null)) ? "AUTOMATICALLY VERIFIED" : "WAITING", detail: "Raw charges are never normalized." },
+    { label: "Atom mapping", status: all((prep) => !orcaDiagnostics(prep).some((item) => item.severity === "ERROR")) ? "AUTOMATICALLY VERIFIED" : "WAITING", detail: "XYZ ↔ ORCA output mapping" },
+    { label: "Connectivity approved", status: all((prep) => prep.connectivityApproved) ? "RESEARCHER ACCEPTED" : "WAITING", detail: "Researcher-authoritative bond graph" },
+    { label: "OPLS-AA atom typing", status: all((prep) => prep.atoms.every((atom) => atom.oplsType && !["UNMAPPED", "REVIEW REQUIRED"].includes(atom.mappingStatus))) ? "RESEARCHER ACCEPTED" : "WAITING", detail: "No fictional type assignment" },
+    { label: "Molecular topology", status: all((prep) => !topologyDiagnostics(prep).some((item) => item.severity === "ERROR")) ? "RESEARCHER ACCEPTED" : "WAITING", detail: "Bonded framework + Mulliken merge" },
+    { label: "Molecular grompp validation", status: all((prep) => prep.gromppValidated) ? "RESEARCHER ACCEPTED" : "WAITING", detail: "External GROMACS validation required" },
+    { label: "Box composition", status: run.compositionCalculation ? "AUTOMATICALLY VERIFIED" : "WAITING", detail: run.compositionCalculation ? `${run.totalMoleculeCount} molecules` : "Density/manual counts required" },
+    { label: "Packed system validated", status: packed && !packedDiagnostics.some((item) => item.severity === "ERROR") ? "AUTOMATICALLY VERIFIED" : "WAITING", detail: packed ? `${packed.atoms.length} atoms` : "Upload packed.pdb" },
+    { label: "EM", status: execution.em === "accepted" ? "RESEARCHER ACCEPTED" : execution.em === "failed" ? "FAIL" : "NOT RUN", detail: "Maximum force and potential energy" },
+    { label: "NVT", status: execution.nvt === "accepted" ? "RESEARCHER ACCEPTED" : execution.nvt === "failed" ? "FAIL" : "NOT RUN", detail: "Temperature stability" },
+    { label: "NPT", status: execution.npt === "accepted" ? "RESEARCHER ACCEPTED" : execution.npt === "failed" ? "FAIL" : "NOT RUN", detail: "Density, pressure, and volume" },
+    { label: "Production", status: execution.production === "accepted" ? "RESEARCHER ACCEPTED" : execution.production === "failed" ? "FAIL" : "NOT RUN", detail: "Equilibrium trajectory" },
+    { label: "RDF", status: rdf.length ? "AUTOMATICALLY VERIFIED" : "NOT RUN", detail: `${rdf.length}/${pairwiseSpecies(run, state.molecules).length} pair dataset(s)` },
+    { label: "KBI calculations available", status: analyzed.length ? "AUTOMATICALLY VERIFIED" : "NOT RUN", detail: `${analyzed.length} calculations available; acceptance/convergence is checked in KBI Analyzer, not inferred from this count.` },
   ]
 }
 
@@ -769,7 +793,8 @@ export function preparationPackageFiles(state: OrcaGromacsState) {
       { path: `${base}/topology/x2top_command.sh`, content: `#!/usr/bin/env bash\nset -euo pipefail\n${commandText(state, `molecule:${preparation.moleculeId}:${slug(preparation.moleculeId)}_x2top.sh`, x2topCommand(preparation))}\n` },
       { path: `${base}/metadata.json`, content: JSON.stringify({ ...preparation, xyzFile: preparation.xyzFile ? { ...preparation.xyzFile, text: "preserved in source/" } : null, outFile: preparation.outFile ? { ...preparation.outFile, text: "preserved in source/" } : null, status: preparationStatus(preparation), diagnostics: topologyDiagnostics(preparation) }, null, 2) },
     )
-    if (preparation.topologyText) files.push({ path: `${base}/topology/${preparation.topologyFileName || "imported_x2top.top"}`, content: preparation.topologyText })
+    if (preparation.topologyText) files.push({ path: `${base}/source/edited_topology.top`, content: preparation.topologyText })
+    if(preparation.originalTopologyFile)files.push({path:`${base}/source/original_topology.top`,content:preparation.originalTopologyFile.text})
   }
   return files
 }
