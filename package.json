@@ -1,7 +1,7 @@
 {
   "name": "solvforge-md",
-  "version": "1.0.2",
-  "description": "Local-first GROMACS planning and Kirkwood\u2013Buff analysis for reproducible solvent research.",
+  "version": "2.0.0",
+  "description": "Local-first, force-field-agnostic QM-to-GROMACS topology, packing, and simulation input preparation bridge.",
   "license": "GPL-3.0-only",
   "author": "Yehosyua Widiatmo Wyldanta",
   "repository": {

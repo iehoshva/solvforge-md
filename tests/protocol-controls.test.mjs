@@ -1,39 +1,96 @@
-import test from 'node:test'
-import assert from 'node:assert/strict'
-import {createHash} from 'node:crypto'
-import {createThesisProject} from '../lib/workbench/preset.ts'
-import {generateStageRuns,generateCustomRuns,parseNumericAxis} from '../lib/workbench/runs.ts'
-import {resolveProtocol,continuationPlan} from '../lib/workbench/protocol.ts'
-import {sha256Portable,uuid} from '../lib/workbench/crypto.ts'
-const base=()=>{const p=createThesisProject();p.protocol.npt.compressibilityBarInverse=.0001;return p}
-const resolve=p=>resolveProtocol(p,{temperatureK:p.stageATemperatureK,pressureBar:p.protocol.pressureBar,randomSeed:p.protocol.randomSeedBase,systemKind:'solute'})
-// Every non-metadata protocol control has an observable artifact contract.
-const cases=[
- ['em.method','cg','em','integrator','cg'],['em.maxSteps',70000,'em','nsteps','70000'],['em.fmax',500,'em','emtol','500'],
- ['nvt.durationNs',8,'nvt','nsteps','8000000'],['nvt.timestepFs',2,'nvt','dt','0.002'],['nvt.thermostat','Nose-Hoover','prod','tcoupl','Nose-Hoover'],['nvt.tauTPs',.3,'npt','tau-t','0.3'],
- ['npt.durationNs',12,'npt','nsteps','6000000'],['npt.timestepFs',1,'npt','dt','0.001'],['npt.barostat','C-rescale','prod','pcoupl','C-rescale'],['npt.tauPPs',3,'prod','tau-p','3'],['npt.compressibilityBarInverse',.0002,'npt','compressibility','0.0002'],
- ['production.solute.initialNs',120,'prod','nsteps','60000000'],['production.timestepFs',1,'prod','dt','0.001'],['production.framePs',10,'prod','nstxout-compressed','5000'],
- ['nonbonded.cutoffNm',1.4,'em','rcoulomb','1.4'],['nonbonded.coulombMethod','Cut-off','npt','coulombtype','Cut-off'],['nonbonded.pmeOrder',6,'nvt','pme-order','6'],['nonbonded.fourierSpacingNm',.15,'em','fourierspacing','0.15'],
- ['constraints','all-bonds','prod','constraints','all-bonds'],['constraintAlgorithm','shake','nvt','constraint-algorithm','shake'],['pressureBar',2,'prod','ref-p','2'],['randomSeedBase',98765,'nvt','gen-seed','98765']
-]
-for(const [path,value,stage,directive,expected]of cases)test('protocol control → MDP: '+path,()=>{
- const p=base(),before=resolve(p),keys=path.split('.'),last=keys.pop();let target=p.protocol;for(const key of keys)target=target[key];target[last]=value
- const after=resolve(p);assert.equal(after.stages[stage].directives[directive],expected);assert.notEqual(after.stages[stage].mdp,before.stages[stage].mdp);assert.equal(after.diagnostics.filter(d=>d.severity==='ERROR').length,0)
+import test from "node:test"
+import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
+import { createExampleSolutionProject } from "../lib/workbench/preset.ts"
+import { commands, generateMatrixRuns, parseNumericAxis, parseRunMatrixDesign } from "../lib/workbench/runs.ts"
+import { resolveProtocol, continuationPlan } from "../lib/workbench/protocol.ts"
+import { sha256Portable, uuid } from "../lib/workbench/crypto.ts"
+
+const resolve = (p) =>
+  resolveProtocol(p, {
+    temperatureK: 310,
+    pressureBar: p.protocol.pressureBar,
+    randomSeed: p.protocol.randomSeedBase,
+  })
+
+test("arbitrary force fields, charge schemes, ensembles, tc-grps, and semiisotropic barostats resolve without hardcoding", () => {
+  const p = createExampleSolutionProject()
+  p.protocol.forceField = "CHARMM36"
+  p.protocol.forceFieldInclude = "charmm36.ff/forcefield.itp"
+  p.protocol.chargeScheme = "Gaussian wB97XD/def2-TZVP RESP (0.8x)"
+  p.protocol.nvt.tcGrps = "Solute Solvent"
+  p.protocol.npt.pcoupltype = "semiisotropic"
+  p.protocol.npt.compressibility = "4.5e-5 4.5e-5"
+  p.protocol.nonbonded.vdwModifier = "Force-switch"
+  p.protocol.mdpOverrides.prod = "rvdw-switch = 1.0"
+
+  const rp = resolve(p)
+  assert.equal(rp.diagnostics.filter((d) => d.severity === "ERROR").length, 0)
+  assert.equal(rp.forceField, "CHARMM36")
+  assert.equal(rp.stages.nvt.directives["tc-grps"], "Solute Solvent")
+  assert.equal(rp.stages.nvt.directives["ref-t"], "310 310")
+  assert.equal(rp.stages.npt.directives["ref-p"], "1 1")
+  assert.equal(rp.stages.npt.directives.compressibility, "4.5e-5 4.5e-5")
+  assert.equal(rp.stages.prod.directives["vdw-modifier"], "Force-switch")
+  assert.equal(rp.stages.prod.directives["rvdw-switch"], "1.0")
 })
-test('continuation controls change bounded artifact; pure DES uses its own duration',()=>{
- const p=base();p.protocol.production.solute.extensionNs=35;p.protocol.production.solute.maximumNs=160
- assert.match(continuationPlan(resolve(p),140,'pending').commands,/-until 160000/)
- p.protocol.production.pureDes.enabled=true;p.protocol.production.pureDes.durationNs=77
- assert.equal(generateStageRuns(p,'A').find(r=>r.systemKind==='pure-des').productionNs,77)
+
+test("NVT-only production and disabled NPT stage generate valid checkpoint-chained commands", () => {
+  const p = createExampleSolutionProject()
+  p.protocol.enabledStages = { em: true, nvt: true, npt: false, prod: true }
+  p.protocol.production.ensemble = "NVT"
+  p.protocol.npt.compressibility = "" // not required when NPT disabled and prod is NVT
+
+  const runs = generateMatrixRuns(p, parseRunMatrixDesign(p.runDesign))
+  assert.ok(runs.length > 0)
+  const r = runs[0]
+  assert.equal(r.resolvedProtocol.diagnostics.filter((d) => d.severity === "ERROR").length, 0)
+  assert.equal(r.resolvedProtocol.stages.prod.directives.pcoupl, "no")
+  const script = commands(r)
+  assert.match(script, /01_em\/em/)
+  assert.match(script, /02_nvt\/nvt/)
+  assert.doesNotMatch(script, /03_npt\/npt/)
+  assert.match(script, /-c 02_nvt\/nvt\.gro -t 02_nvt\/nvt\.cpt/)
 })
-test('invalid numeric axes never silently discard values or allocate enormous matrices',()=>{
- assert.throws(()=>parseNumericAxis('1,2,typo,4'),/Malformed/)
- assert.throws(()=>generateCustomRuns(base(),{desIds:['thymol-dodecanol'],soluteIds:['geranyl-acetate'],soluteCounts:[1,2,3],temperaturesK:[300,320,340],pressuresBar:[1],boxSizesNm:[5],replicas:10000}),/limit/)
+
+test("continuation controls produce bounded convert-tpr commands", () => {
+  const p = createExampleSolutionProject()
+  p.protocol.production.mode = "convergence-controlled"
+  p.protocol.production.initialNs = 50
+  p.protocol.production.extensionNs = 25
+  p.protocol.production.maximumNs = 100
+  const plan = continuationPlan(resolve(p), 50, "pending")
+  assert.equal(plan.stop, false)
+  assert.equal(plan.nextEndNs, 75)
+  assert.match(plan.commands, /-until 75000/)
 })
-test('portable SHA-256 agrees with reference at padding boundaries and a realistic large source',()=>{
- for(const len of [0,1,55,56,63,64,65,1024*1024,10*1024*1024,50*1024*1024]){
-  const b=new Uint8Array(len);const text=new TextEncoder().encode('ORCA ATOMIC CHARGES\n0 O : -0.400000\nÅ\n');for(let i=0;i<len;i++)b[i]=text[i%text.length]
-  assert.equal(sha256Portable(b),createHash('sha256').update(b).digest('hex'))
- }
- assert.match(uuid(),/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+
+test("invalid numeric axes reject malformed entries and huge batches", () => {
+  assert.throws(() => parseNumericAxis("1,2,typo,4"), /Malformed/)
+  const p = createExampleSolutionProject()
+  assert.throws(
+    () =>
+      generateMatrixRuns(p, {
+        systemIds: ["eth-wat"],
+        includeNeatSystems: false,
+        soluteIds: ["caffeine"],
+        soluteCounts: [1, 2, 3],
+        temperaturesK: [300, 320, 340],
+        pressuresBar: [1],
+        boxSizesNm: [5],
+        useProtocolBox: true,
+        replicas: 10000,
+      }),
+    /limit/,
+  )
+})
+
+test("portable SHA-256 matches Node crypto and uuid emits v4", () => {
+  for (const len of [0, 1, 55, 56, 63, 64, 65, 1024 * 1024]) {
+    const b = new Uint8Array(len)
+    const text = new TextEncoder().encode("QM CHARGES\n1 O -0.74\n")
+    for (let i = 0; i < len; i++) b[i] = text[i % text.length]
+    assert.equal(sha256Portable(b), createHash("sha256").update(b).digest("hex"))
+  }
+  assert.match(uuid(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 })

@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SolvForge MD",
-  description: "Local-first molecular simulation preparation, GROMACS planning, and Kirkwood–Buff analysis for reproducible solvent research.",
+  title: "SolvForge MD — QM → GROMACS Bridge",
+  description: "Local-first, force-field-agnostic QM-to-GROMACS topology, packing, and simulation input preparation bridge.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

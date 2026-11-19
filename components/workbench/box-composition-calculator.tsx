@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { Check, ExternalLink, Plus, Trash2 } from "lucide-react"
+import { Check, Plus, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
@@ -10,96 +10,458 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import type { BoxCompositionSettings, DensityPoint, ProjectState } from "@/lib/workbench/types"
 import { boxDimensionsNm, boxVolumeNm3, calculateBoxComposition, compositionStateKey } from "@/lib/workbench/composition"
-import { applyAllCompatibleThesisDensityReferences, applyDensityReference, compatibleDensityReferences } from "@/lib/workbench/density-presets"
 import { newId } from "@/lib/workbench/preset"
 import { EmptyEvidence, Field, InlineWarning, Metric, Section, StatusBadge } from "./shared"
 
-type Context = "system" | "A" | "B" | "C" | "custom"
-
-export function BoxCompositionCalculator({ project, setProject, context = "system" }: { project: ProjectState; setProject: (project: ProjectState) => void; context?: Context }) {
-  const [desId, setDesId] = useState(project.selectedChampion?.valueId ?? project.desSystems[0]?.id ?? "")
+export function BoxCompositionCalculator({ project, setProject }: { project: ProjectState; setProject: (project: ProjectState) => void }) {
+  const [systemId, setSystemId] = useState(project.systems[0]?.id ?? "")
   const [soluteId, setSoluteId] = useState(project.soluteIds[0] ?? "")
-  const initialCount = context === "A" ? project.stageASoluteCount : context === "C" ? project.concentrations.find((point) => point.id === project.selectedOptimum?.valueId)?.soluteCount ?? 1 : project.concentrations[0]?.soluteCount ?? 1
-  const initialTemperature = context === "A" ? project.stageATemperatureK : context === "B" ? project.stageBTemperatureK : context === "C" ? project.temperaturesK[0] ?? 298.15 : project.stageBTemperatureK
-  const [soluteCount, setSoluteCount] = useState(initialCount)
-  const [temperatureK, setTemperatureK] = useState(initialTemperature)
-  const system = project.desSystems.find((item) => item.id === desId)
-  const referenceOptions = compatibleDensityReferences(system)
-  const result = useMemo(() => calculateBoxComposition(project, desId, soluteId, soluteCount, temperatureK), [project, desId, soluteId, soluteCount, temperatureK])
+  const [soluteCount, setSoluteCount] = useState(0)
+  const [temperatureK, setTemperatureK] = useState(298.15)
+
+  const activeSystemId = project.systems.some((s) => s.id === systemId) ? systemId : (project.systems[0]?.id ?? "")
+  const system = project.systems.find((item) => item.id === activeSystemId)
+  const activeSoluteId = soluteId && project.molecules.some((m) => m.id === soluteId) ? soluteId : ""
+
+  const result = useMemo(
+    () => calculateBoxComposition(project, activeSystemId, activeSoluteId, soluteCount, temperatureK),
+    [project, activeSystemId, activeSoluteId, soluteCount, temperatureK],
+  )
   const dimensionsNm = boxDimensionsNm(project.protocol.box)
-  const patchSystem = (patch: Partial<NonNullable<typeof system>>) => system && setProject({ ...project, desSystems: project.desSystems.map((item) => item.id === system.id ? { ...item, ...patch } : item) })
-  const patchSettings = (patch: Partial<BoxCompositionSettings>) => system && patchSystem({ compositionSettings: { ...system.compositionSettings, ...patch } })
-  const patchDensity = (id: string, patch: Partial<DensityPoint>) => system && patchSettings({ densityPoints: system.compositionSettings.densityPoints.map((point) => point.id === id ? { ...point, ...patch, referenceId: undefined, derivation: "user-supplied", methodNote: "", sources: [] } : point) })
-  const applyReferenceSelection = (referenceId: string) => {
-    const reference = referenceOptions.find((item) => item.id === referenceId)
-    if (reference) setProject(applyDensityReference(project, reference))
-  }
+
+  const patchSystem = (patch: Partial<NonNullable<typeof system>>) =>
+    system && setProject({ ...project, systems: project.systems.map((item) => (item.id === system.id ? { ...item, ...patch } : item)) })
+  const patchSettings = (patch: Partial<BoxCompositionSettings>) =>
+    system && patchSystem({ compositionSettings: { ...system.compositionSettings, ...patch } })
+  const patchDensity = (id: string, patch: Partial<DensityPoint>) =>
+    system &&
+    patchSettings({
+      densityPoints: system.compositionSettings.densityPoints.map((point) =>
+        point.id === id ? { ...point, ...patch, derivation: "user-supplied" } : point,
+      ),
+    })
+
   const changeBoxUnit = (unit: "nm" | "angstrom") => {
     const current = project.protocol.box.unit ?? "nm"
     if (unit === current) return
     const factor = unit === "angstrom" ? 10 : 0.1
-    setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, x: project.protocol.box.x * factor, y: project.protocol.box.y * factor, z: project.protocol.box.z * factor, unit } } })
+    setProject({
+      ...project,
+      protocol: {
+        ...project.protocol,
+        box: { ...project.protocol.box, x: project.protocol.box.x * factor, y: project.protocol.box.y * factor, z: project.protocol.box.z * factor, unit },
+      },
+    })
   }
-  const candidateKey = system ? compositionStateKey(temperatureK, soluteId, system.compositionSettings.lockAcrossSeries ? system.compositionSettings.lockReferenceSoluteCount : soluteCount, project, system) : ""
+
+  const candidateKey = system
+    ? compositionStateKey(
+        temperatureK,
+        activeSoluteId,
+        system.compositionSettings.lockAcrossSeries ? system.compositionSettings.lockReferenceSoluteCount : soluteCount,
+        project,
+        system,
+      )
+    : ""
+
   const selectCandidate = (multiplier: number) => {
     if (!system || !Number.isInteger(multiplier) || multiplier <= 0) return
     patchSettings({ selectedMultipliers: { ...system.compositionSettings.selectedMultipliers, [candidateKey]: multiplier } })
   }
-  const resetCandidate = () => { if (!system) return; const next = { ...system.compositionSettings.selectedMultipliers }; delete next[candidateKey]; patchSettings({ selectedMultipliers: next }) }
-  const series = context === "B" && system ? project.concentrations.map((point) => ({ point, result: calculateBoxComposition(project, system.id, soluteId, point.soluteCount, project.stageBTemperatureK) })) : []
-  const temperatureSeries = context === "C" && system ? project.temperaturesK.map((temperature) => ({ temperature, result: calculateBoxComposition(project, system.id, soluteId, soluteCount, temperature) })) : []
+
+  const resetCandidate = () => {
+    if (!system) return
+    const next = { ...system.compositionSettings.selectedMultipliers }
+    delete next[candidateKey]
+    patchSettings({ selectedMultipliers: next })
+  }
+
   const metadata = result.metadata
   const selected = result.selected
   const usedCounts = result.componentCounts
-  return <Section title="Box Composition Calculator" kicker={`Mode ${system?.compositionSettings.mode === "manual" ? "A · manual counts" : "B · box + density"}`} actions={<StatusBadge tone={result.diagnostics.some((item) => item.severity === "ERROR") ? "danger" : result.diagnostics.some((item) => item.severity === "WARNING") ? "warning" : "good"}>{result.diagnostics.some((item) => item.severity === "ERROR") ? "input required" : usedCounts ? "composition resolved" : "waiting"}</StatusBadge>}>
-    <div className="form-grid form-grid-4">
-      <div className="field-stack"><Label>Solvent system</Label><Select value={desId} onValueChange={setDesId}><SelectTrigger><SelectValue placeholder="Select system"/></SelectTrigger><SelectContent>{project.desSystems.map((item) => <SelectItem key={item.id} value={item.id}>{item.name} · {item.ratio.join(":")}</SelectItem>)}</SelectContent></Select></div>
-      <div className="field-stack"><Label>Composition mode</Label><Select value={system?.compositionSettings.mode ?? "density"} onValueChange={(value) => patchSettings({ mode: value as "manual" | "density" })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="manual">A — Manual molecule counts</SelectItem><SelectItem value="density">B — Calculate from box + density</SelectItem></SelectContent></Select></div>
-      <div className="field-stack"><Label>Solute</Label><Select value={soluteId} onValueChange={setSoluteId}><SelectTrigger><SelectValue placeholder="Select solute"/></SelectTrigger><SelectContent>{project.soluteIds.map((id) => <SelectItem key={id} value={id}>{project.molecules.find((item) => item.id === id)?.fullName}</SelectItem>)}</SelectContent></Select></div>
-      <Field label="Calculator preview solute molecules" type="number" value={soluteCount} onChange={(value) => setSoluteCount(Number(value))}/>
-      <Field label="Calculator preview temperature (K)" type="number" step="0.01" value={temperatureK} onChange={(value) => setTemperatureK(Number(value))}/>
-      <Field label={`Box X (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`} type="number" step="0.1" value={project.protocol.box.x} onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, x: Number(value) } } })}/>
-      <Field label={`Box Y (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`} type="number" step="0.1" value={project.protocol.box.y} onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, y: Number(value) } } })}/>
-      <Field label={`Box Z (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`} type="number" step="0.1" value={project.protocol.box.z} onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, z: Number(value) } } })}/>
-      <div className="field-stack"><Label>Box unit</Label><Select value={project.protocol.box.unit ?? "nm"} onValueChange={(value) => changeBoxUnit(value as "nm" | "angstrom")}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="nm">nanometre (nm)</SelectItem><SelectItem value="angstrom">ångström (Å)</SelectItem></SelectContent></Select></div>
-      <div className="field-stack"><Label>Box geometry</Label><Select value={project.protocol.box.geometry} onValueChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, geometry: value } } })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="cubic">Cubic</SelectItem><SelectItem value="orthorhombic">Orthorhombic</SelectItem></SelectContent></Select></div>
-    </div>
+  const hasError = result.diagnostics.some((item) => item.severity === "ERROR")
 
-    {system && <>
-      <div className="composition-rule"><span>Requested integer ratio</span><strong>{system.componentIds.map((id, index) => `${project.molecules.find((item) => item.id === id)?.abbreviation ?? id}=${system.ratio[index]}n`).join(" · ")}</strong><small>A ratio fixes relative counts only. Absolute counts require manual input or mass–volume data.</small></div>
-      <Section title="Molecular weights used" kicker="Registry with optional override"><div className="table-scroll"><Table className="dense-table"><TableHeader><TableRow><TableHead>Species</TableHead><TableHead>Registry MW / g mol⁻¹</TableHead><TableHead>Override / g mol⁻¹</TableHead><TableHead>Value used</TableHead></TableRow></TableHeader><TableBody>{[...system.componentIds, soluteId].map((id) => { const molecule = project.molecules.find((item) => item.id === id); const override = system.compositionSettings.molecularWeightOverrides[id]; return <TableRow key={id}><TableCell>{molecule?.fullName ?? id}</TableCell><TableCell>{molecule?.molecularWeight ?? "missing"}</TableCell><TableCell><Input type="number" step="0.001" placeholder="use registry" value={override ?? ""} onChange={(event) => { const next = { ...system.compositionSettings.molecularWeightOverrides }; if (event.target.value === "") delete next[id]; else next[id] = Number(event.target.value); patchSettings({ molecularWeightOverrides: next }) }}/></TableCell><TableCell><strong>{result.molecularWeights[id] ?? "required"}</strong></TableCell></TableRow> })}</TableBody></Table></div></Section>
+  return (
+    <Section
+      title="Box Composition Calculator"
+      kicker={system?.compositionSettings.mode === "manual" ? "Manual molecule counts" : "Box volume + target density"}
+      actions={
+        <StatusBadge tone={hasError ? "danger" : result.diagnostics.some((i) => i.severity === "WARNING") ? "warning" : "good"}>
+          {hasError ? "input required" : usedCounts ? "composition resolved" : "waiting"}
+        </StatusBadge>
+      }
+    >
+      <div className="form-grid form-grid-4">
+        <div className="field-stack">
+          <Label>Molecular system</Label>
+          <Select value={activeSystemId} onValueChange={setSystemId}>
+            <SelectTrigger>
+              <SelectValue placeholder="Select system" />
+            </SelectTrigger>
+            <SelectContent>
+              {project.systems.map((item) => (
+                <SelectItem key={item.id} value={item.id}>
+                  {item.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="field-stack">
+          <Label>Composition mode</Label>
+          <Select
+            value={system?.compositionSettings.mode ?? "manual"}
+            onValueChange={(value) => patchSettings({ mode: value as "manual" | "density" })}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="manual">Manual molecule counts</SelectItem>
+              <SelectItem value="density">Calculate from box + density</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="field-stack">
+          <Label>Optional solute preview</Label>
+          <Select value={activeSoluteId || "__none__"} onValueChange={(v) => setSoluteId(v === "__none__" ? "" : v)}>
+            <SelectTrigger>
+              <SelectValue placeholder="None (neat)" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">None (neat system)</SelectItem>
+              {project.molecules.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  {m.fullName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <Field label="Preview solute count" type="number" min="0" value={soluteCount} onChange={(value) => setSoluteCount(Math.max(0, Number(value)))} />
+        <Field label="Preview temperature (K)" type="number" step="0.01" value={temperatureK} onChange={(value) => setTemperatureK(Number(value))} />
+        <Field
+          label={`Box X (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`}
+          type="number"
+          step="0.1"
+          value={project.protocol.box.x}
+          onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, x: Number(value) } } })}
+        />
+        <Field
+          label={`Box Y (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`}
+          type="number"
+          step="0.1"
+          value={project.protocol.box.y}
+          onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, y: Number(value) } } })}
+        />
+        <Field
+          label={`Box Z (${project.protocol.box.unit === "angstrom" ? "Å" : "nm"})`}
+          type="number"
+          step="0.1"
+          value={project.protocol.box.z}
+          onChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, z: Number(value) } } })}
+        />
+        <div className="field-stack">
+          <Label>Box unit</Label>
+          <Select value={project.protocol.box.unit ?? "nm"} onValueChange={(value) => changeBoxUnit(value as "nm" | "angstrom")}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="nm">nanometre (nm)</SelectItem>
+              <SelectItem value="angstrom">ångström (Å)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="field-stack">
+          <Label>Box geometry</Label>
+          <Select
+            value={project.protocol.box.geometry}
+            onValueChange={(value) => setProject({ ...project, protocol: { ...project.protocol, box: { ...project.protocol.box, geometry: value } } })}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="cubic">Cubic</SelectItem>
+              <SelectItem value="orthorhombic">Orthorhombic</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
-      {system.compositionSettings.mode === "manual" ? <Section title="Manual molecule counts" kicker="Absolute counts supplied by researcher"><div className="form-grid form-grid-4">{system.componentIds.map((id, index) => <Field key={id} label={`${project.molecules.find((item) => item.id === id)?.fullName ?? id} molecules`} type="number" value={system.boxCounts[index] ?? ""} onChange={(value) => { const counts = [...system.boxCounts]; counts[index] = value === "" ? null : Number(value); patchSystem({ boxCounts: counts }) }}/>)}</div><InlineWarning title="Manual mode">The requested molar ratio is displayed for comparison but does not replace the counts entered here.</InlineWarning></Section> : <>
-        {referenceOptions.length > 0 && <Section title="323.15 K density reference library" kicker="Optional · researcher selection required" actions={<Button variant="outline" size="sm" onClick={() => setProject(applyAllCompatibleThesisDensityReferences(project))}>Use all four thesis references</Button>}>
-          <InlineWarning title="Provenance before convenience">These records are never applied silently. Thymol:Lauric acid is composition-interpolated from measured mixtures; the other three values are additive-molar-volume estimates from pure-component densities and remain labeled as estimates.</InlineWarning>
-          <div className="density-reference-list">{referenceOptions.map((reference) => {
-            const applied = system.compositionSettings.densityPoints.some((point) => point.referenceId === reference.id)
-            return <article className="density-reference" key={reference.id}>
-              <div><span>{reference.shortLabel}</span><strong>{reference.densityGcm3?.toFixed(4)} g cm⁻³</strong><small>{reference.label}</small></div>
-              <StatusBadge tone={reference.status === "estimated" ? "warning" : "accent"}>{reference.status}</StatusBadge>
-              <p>{reference.sourceNote}</p>
-              <code>{reference.methodNote}</code>
-              <div className="density-reference-sources">{reference.sources?.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={source.url}>{source.citation}<ExternalLink/></a>)}</div>
-              <Button size="sm" variant={applied ? "default" : "outline"} onClick={() => applyReferenceSelection(reference.id)}>{applied ? <><Check/>Reference applied</> : "Use this reference"}</Button>
-            </article>
-          })}</div>
-        </Section>}
-        <Section title="Target-density records" kicker={`${system.compositionSettings.densityPoints.length} saved point(s)`} actions={<Button variant="outline" size="sm" onClick={() => patchSettings({ densityPoints: [...system.compositionSettings.densityPoints, { id: newId("rho"), label: "Manual density record", densityGcm3: null, temperatureK, status: "estimated", sourceNote: "", derivation: "user-supplied", uncertaintyGcm3: null, methodNote: "", sources: [] }] })}><Plus/>Density point</Button>}>
-          <div className="form-grid form-grid-4"><div className="field-stack"><Label>Density input unit</Label><Select value={system.compositionSettings.densityInputUnit} onValueChange={(value) => patchSettings({ densityInputUnit: value as "g/cm3" | "kg/m3" })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="g/cm3">g cm⁻³</SelectItem><SelectItem value="kg/m3">kg m⁻³</SelectItem></SelectContent></Select></div><div className="field-stack"><Label>Missing-temperature policy</Label><Select value={system.compositionSettings.densityResolution} onValueChange={(value) => patchSettings({ densityResolution: value as BoxCompositionSettings["densityResolution"] })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="exact-only">Exact value only</SelectItem><SelectItem value="nearest">Nearest known value · labeled</SelectItem><SelectItem value="linear-interpolation">Linear interpolation · no extrapolation</SelectItem></SelectContent></Select></div><Field label="Nearby candidates each side" type="number" value={system.compositionSettings.candidateSpan} onChange={(value) => patchSettings({ candidateSpan: Number(value) })}/><Field label="Deviation warning (%)" type="number" step="0.1" value={system.compositionSettings.deviationWarningPct} onChange={(value) => patchSettings({ deviationWarningPct: Number(value) })}/></div>
-          {system.compositionSettings.densityPoints.length ? <div className="table-scroll mt-grid"><Table className="dense-table"><TableHeader><TableRow><TableHead>Density / {system.compositionSettings.densityInputUnit === "kg/m3" ? "kg m⁻³" : "g cm⁻³"}</TableHead><TableHead>Temperature / K</TableHead><TableHead>Status</TableHead><TableHead>Derivation</TableHead><TableHead>Source / reference note</TableHead><TableHead/></TableRow></TableHeader><TableBody>{system.compositionSettings.densityPoints.map((point) => <TableRow key={point.id}><TableCell><Input type="number" step="0.001" value={point.densityGcm3 === null ? "" : point.densityGcm3 * (system.compositionSettings.densityInputUnit === "kg/m3" ? 1000 : 1)} onChange={(event) => patchDensity(point.id, { densityGcm3: event.target.value === "" ? null : Number(event.target.value) / (system.compositionSettings.densityInputUnit === "kg/m3" ? 1000 : 1) })}/></TableCell><TableCell><Input type="number" step="0.01" value={point.temperatureK ?? ""} onChange={(event) => patchDensity(point.id, { temperatureK: event.target.value === "" ? null : Number(event.target.value) })}/></TableCell><TableCell><Select value={point.status} onValueChange={(value) => patchDensity(point.id, { status: value as DensityPoint["status"] })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent>{["experimental","literature","estimated","MD-derived"].map((status) => <SelectItem value={status} key={status}>{status}</SelectItem>)}</SelectContent></Select></TableCell><TableCell><span className="derivation-label">{point.derivation ?? "user-supplied"}</span>{point.referenceId && <small>built-in reference</small>}</TableCell><TableCell><Input value={point.sourceNote} placeholder="Citation, dataset, or method" onChange={(event) => patchDensity(point.id, { sourceNote: event.target.value })}/></TableCell><TableCell><Button variant="ghost" size="icon-sm" onClick={() => patchSettings({ densityPoints: system.compositionSettings.densityPoints.filter((item) => item.id !== point.id) })}><Trash2/></Button></TableCell></TableRow>)}</TableBody></Table></div> : <EmptyEvidence text="Target density required before automatic box composition can be calculated. Select a compatible reference above or enter a documented value manually."/>}
-        </Section>
-        <Section title="Solute-mass assumption" kicker="Recorded in every run"><div className="form-grid form-grid-2"><div className="field-stack"><Label>Calculation option</Label><Select value={system.compositionSettings.soluteMassMode} onValueChange={(value) => patchSettings({ soluteMassMode: value as BoxCompositionSettings["soluteMassMode"] })}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectItem value="add-after">Fill DES first, then add solute</SelectItem><SelectItem value="include-in-target">Include solute mass in target density</SelectItem></SelectContent></Select></div><label className="override-row"><Checkbox checked={system.compositionSettings.lockAcrossSeries} onCheckedChange={(value) => patchSettings({ lockAcrossSeries: Boolean(value) })}/><span><strong>Lock DES molecule counts across series</strong><small>Only the solute count changes; resulting total density is reported for each loading.</small></span></label>{system.compositionSettings.lockAcrossSeries && <Field label="Reference solute loading for locked DES" type="number" value={system.compositionSettings.lockReferenceSoluteCount} onChange={(value) => patchSettings({ lockReferenceSoluteCount: Number(value) })}/>}</div></Section>
-      </>}
+      {system && (
+        <>
+          {system.compositionSettings.mode === "manual" ? (
+            <Section title="Manual molecule counts" kicker="Direct absolute counts">
+              <div className="form-grid form-grid-4">
+                {system.componentIds.map((id, index) => (
+                  <Field
+                    key={`${id}-${index}`}
+                    label={`${project.molecules.find((item) => item.id === id)?.fullName ?? id} count`}
+                    type="number"
+                    min="1"
+                    value={system.boxCounts[index] ?? ""}
+                    onChange={(value) => {
+                      const counts = [...system.boxCounts]
+                      counts[index] = value === "" ? null : Number(value)
+                      patchSystem({ boxCounts: counts })
+                    }}
+                  />
+                ))}
+              </div>
+            </Section>
+          ) : (
+            <>
+              <Section
+                title="Target-density records"
+                kicker={`${system.compositionSettings.densityPoints.length} point(s)`}
+                actions={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      patchSettings({
+                        densityPoints: [
+                          ...system.compositionSettings.densityPoints,
+                          {
+                            id: newId("rho"),
+                            label: "Density record",
+                            densityGcm3: null,
+                            temperatureK,
+                            status: "experimental",
+                            sourceNote: "",
+                            derivation: "user-supplied",
+                          },
+                        ],
+                      })
+                    }
+                  >
+                    <Plus />
+                    Add density point
+                  </Button>
+                }
+              >
+                <div className="form-grid form-grid-4">
+                  <div className="field-stack">
+                    <Label>Density unit</Label>
+                    <Select
+                      value={system.compositionSettings.densityInputUnit}
+                      onValueChange={(value) => patchSettings({ densityInputUnit: value as "g/cm3" | "kg/m3" })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="g/cm3">g cm⁻³</SelectItem>
+                        <SelectItem value="kg/m3">kg m⁻³</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="field-stack">
+                    <Label>Temperature lookup</Label>
+                    <Select
+                      value={system.compositionSettings.densityResolution}
+                      onValueChange={(value) => patchSettings({ densityResolution: value as BoxCompositionSettings["densityResolution"] })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="exact-only">Exact temperature only</SelectItem>
+                        <SelectItem value="nearest">Nearest known point</SelectItem>
+                        <SelectItem value="linear-interpolation">Linear interpolation</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Field
+                    label="Solute mass mode"
+                    value={system.compositionSettings.soluteMassMode}
+                    onChange={(v) => patchSettings({ soluteMassMode: v === "add-after" ? "add-after" : "include-in-target" })}
+                    note="include-in-target or add-after"
+                  />
+                  <label className="override-row">
+                    <Checkbox
+                      checked={system.compositionSettings.lockAcrossSeries}
+                      onCheckedChange={(value) => patchSettings({ lockAcrossSeries: Boolean(value) })}
+                    />
+                    <span>
+                      <strong>Lock base counts across solute loadings</strong>
+                    </span>
+                  </label>
+                </div>
 
-      {result.diagnostics.map((item, index) => <div className={`diagnostic diagnostic-${item.severity.toLowerCase()}`} key={`${item.code}-${index}`}><StatusBadge tone={item.severity === "ERROR" ? "danger" : item.severity === "WARNING" ? "warning" : "good"}>{item.severity}</StatusBadge><code>{item.code}</code><span>{item.message}</span></div>)}
+                {system.compositionSettings.densityPoints.length ? (
+                  <div className="table-scroll mt-grid">
+                    <Table className="dense-table">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Density ({system.compositionSettings.densityInputUnit === "kg/m3" ? "kg m⁻³" : "g cm⁻³"})</TableHead>
+                          <TableHead>Temperature (K)</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead>Source note</TableHead>
+                          <TableHead />
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {system.compositionSettings.densityPoints.map((point) => (
+                          <TableRow key={point.id}>
+                            <TableCell>
+                              <Input
+                                type="number"
+                                step="any"
+                                value={
+                                  point.densityGcm3 === null
+                                    ? ""
+                                    : point.densityGcm3 * (system.compositionSettings.densityInputUnit === "kg/m3" ? 1000 : 1)
+                                }
+                                onChange={(e) =>
+                                  patchDensity(point.id, {
+                                    densityGcm3:
+                                      e.target.value === ""
+                                        ? null
+                                        : Number(e.target.value) / (system.compositionSettings.densityInputUnit === "kg/m3" ? 1000 : 1),
+                                  })
+                                }
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <Input
+                                type="number"
+                                step="0.01"
+                                value={point.temperatureK ?? ""}
+                                onChange={(e) => patchDensity(point.id, { temperatureK: e.target.value === "" ? null : Number(e.target.value) })}
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <Select
+                                value={point.status}
+                                onValueChange={(v) => patchDensity(point.id, { status: v as DensityPoint["status"] })}
+                              >
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {["experimental", "literature", "estimated", "MD-derived"].map((st) => (
+                                    <SelectItem value={st} key={st}>
+                                      {st}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </TableCell>
+                            <TableCell>
+                              <Input value={point.sourceNote} placeholder="Reference or note" onChange={(e) => patchDensity(point.id, { sourceNote: e.target.value })} />
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() =>
+                                  patchSettings({ densityPoints: system.compositionSettings.densityPoints.filter((p) => p.id !== point.id) })
+                                }
+                              >
+                                <Trash2 />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : (
+                  <InlineWarning title="Target density required">
+                    Add a density point above (or switch to Manual molecule counts).
+                  </InlineWarning>
+                )}
+              </Section>
+            </>
+          )}
 
-      {result.candidates.length > 0 && <Section title="Nearby integer-ratio candidates" kicker="Alternatives remain visible"><div className="table-scroll"><Table className="dense-table"><TableHeader><TableRow><TableHead>Use</TableHead><TableHead>n</TableHead>{system.componentIds.map((id) => <TableHead key={id}>N {project.molecules.find((item) => item.id === id)?.abbreviation ?? id}</TableHead>)}<TableHead>Total DES</TableHead><TableHead>Total mass / g</TableHead><TableHead>DES-only ρ</TableHead><TableHead>Final ρ / g cm⁻³</TableHead><TableHead>Δρ / g cm⁻³</TableHead><TableHead>Relative error</TableHead></TableRow></TableHeader><TableBody>{result.candidates.map((candidate) => <TableRow key={candidate.multiplier} data-selected={selected?.multiplier === candidate.multiplier}><TableCell><Button size="sm" variant={selected?.multiplier === candidate.multiplier ? "default" : "outline"} onClick={() => selectCandidate(candidate.multiplier)}>{selected?.multiplier === candidate.multiplier ? <><Check/>Selected</> : "Use"}</Button></TableCell><TableCell>{candidate.multiplier}{candidate.mathematicallyClosest && <small className="candidate-best">closest</small>}</TableCell>{candidate.componentCounts.map((count, index) => <TableCell key={index}>{count}</TableCell>)}<TableCell>{candidate.totalDesMolecules}</TableCell><TableCell>{candidate.totalMassG.toExponential(6)}</TableCell><TableCell>{candidate.desOnlyDensityGcm3.toFixed(6)}</TableCell><TableCell>{candidate.estimatedDensityGcm3.toFixed(6)}</TableCell><TableCell>{candidate.densityDeviationGcm3.toExponential(3)}</TableCell><TableCell>{candidate.relativeDensityErrorPct.toFixed(4)}%</TableCell></TableRow>)}</TableBody></Table></div><div className="candidate-control"><Field label="Direct integer multiplier n" type="number" min="1" value={selected?.multiplier ?? ""} onChange={(value) => selectCandidate(Number(value))} note="Enter any positive integer to retain a composition outside the nearby list."/><Button variant="outline" size="sm" onClick={resetCandidate}>Use mathematical closest</Button></div><p className="table-note">“Closest” follows the selected assumption: DES-only density for “fill DES first,” or total target mass including the reference solute loading for “include solute mass.” The selected alternative is preserved in provenance.</p></Section>}
+          {result.diagnostics.map((item, index) => (
+            <div className={`diagnostic diagnostic-${item.severity.toLowerCase()}`} key={`${item.code}-${index}`}>
+              <StatusBadge tone={item.severity === "ERROR" ? "danger" : item.severity === "WARNING" ? "warning" : "good"}>
+                {item.severity}
+              </StatusBadge>
+              <code>{item.code}</code>
+              <span>{item.message}</span>
+            </div>
+          ))}
 
-      {metadata && usedCounts && <Section title="System composition" kicker="Calculated result"><div className="metrics-row"><Metric label="DES" value={system.name} detail={`target ratio ${system.ratio.join(":")} · actual ${metadata.actualDesRatio.map((value) => value.toFixed(5)).join(":")}`}/><Metric label="Box" value={`${dimensionsNm.x.toFixed(3)} × ${dimensionsNm.y.toFixed(3)} × ${dimensionsNm.z.toFixed(3)} nm`}/><Metric label="Volume" value={`${boxVolumeNm3(project.protocol.box).toFixed(3)} nm³`}/><Metric label="Target density" value={metadata.targetDensityGcm3 === null ? "not supplied" : `${metadata.targetDensityGcm3.toFixed(6)} g cm⁻³`} detail={metadata.densityReferenceTemperatureK === null ? metadata.densityStatus ?? "" : `${metadata.densityReferenceTemperatureK} K · ${metadata.densityStatus}`}/><Metric label="Estimated density" value={`${metadata.estimatedDensityGcm3?.toFixed(6)} g cm⁻³`} tone={Math.abs(metadata.densityDeviationPct ?? 0) > system.compositionSettings.deviationWarningPct ? "warning" : "good"}/><Metric label="Density deviation" value={metadata.densityDeviationPct === null ? "—" : `${metadata.densityDeviationPct.toFixed(4)}%`}/><Metric label="Total DES molecules" value={usedCounts.reduce((sum, value) => sum + value, 0)}/><Metric label="Total molecules" value={usedCounts.reduce((sum, value) => sum + value, soluteCount)}/></div><div className="table-scroll"><Table className="dense-table"><TableHeader><TableRow><TableHead>Species</TableHead><TableHead>Count</TableHead><TableHead>MW used / g mol⁻¹</TableHead><TableHead>Mole fraction xᵢ</TableHead><TableHead>Mass fraction wᵢ</TableHead><TableHead>Number density / molecules nm⁻³</TableHead><TableHead>DES-normalized x</TableHead></TableRow></TableHeader><TableBody>{[...system.componentIds, soluteId].map((id, index) => <TableRow key={id}><TableCell>{project.molecules.find((item) => item.id === id)?.fullName ?? id}</TableCell><TableCell>{index < system.componentIds.length ? usedCounts[index] : soluteCount}</TableCell><TableCell>{metadata.molecularWeightsUsed[id]}</TableCell><TableCell>{metadata.moleFractions[id]?.toFixed(8)}</TableCell><TableCell>{metadata.massFractions[id]?.toFixed(8)}</TableCell><TableCell>{metadata.numberDensitiesNm3[id]?.toFixed(6)}</TableCell><TableCell>{metadata.desNormalizedMoleFractions[id] === undefined ? "solute" : metadata.desNormalizedMoleFractions[id].toFixed(8)}</TableCell></TableRow>)}</TableBody></Table></div><div className="density-provenance"><span>Density provenance</span><strong>{metadata.densityLabel || "Custom density record"}</strong><small>{metadata.densityStatus ?? "unspecified"} · {metadata.densityDerivation ?? "user-supplied"} · uncertainty {metadata.densityUncertaintyGcm3 === null ? "not quantified" : `±${metadata.densityUncertaintyGcm3} g cm⁻³`}</small><p>{metadata.densitySourceNote || "No source note supplied."}</p>{metadata.densityMethodNote && <code>{metadata.densityMethodNote}</code>}{metadata.densitySources.length > 0 && <div className="density-reference-sources">{metadata.densitySources.map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={source.url}>{source.citation}<ExternalLink/></a>)}</div>}</div><p className="table-note">Total number density: {metadata.totalNumberDensityNm3.toFixed(6)} molecules nm⁻³.</p></Section>}
+          {result.candidates.length > 0 && (
+            <Section title="Integer-ratio candidates" kicker="Choose multiplier n">
+              <div className="table-scroll">
+                <Table className="dense-table">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Use</TableHead>
+                      <TableHead>n</TableHead>
+                      {system.componentIds.map((id) => (
+                        <TableHead key={id}>N ({project.molecules.find((item) => item.id === id)?.abbreviation ?? id})</TableHead>
+                      ))}
+                      <TableHead>Estimated ρ (g cm⁻³)</TableHead>
+                      <TableHead>Relative error</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {result.candidates.map((candidate) => (
+                      <TableRow key={candidate.multiplier} data-selected={selected?.multiplier === candidate.multiplier}>
+                        <TableCell>
+                          <Button
+                            size="sm"
+                            variant={selected?.multiplier === candidate.multiplier ? "default" : "outline"}
+                            onClick={() => selectCandidate(candidate.multiplier)}
+                          >
+                            {selected?.multiplier === candidate.multiplier ? (
+                              <>
+                                <Check />
+                                Selected
+                              </>
+                            ) : (
+                              "Use"
+                            )}
+                          </Button>
+                        </TableCell>
+                        <TableCell>
+                          {candidate.multiplier}
+                          {candidate.mathematicallyClosest && <small className="candidate-best"> closest</small>}
+                        </TableCell>
+                        {candidate.componentCounts.map((count, index) => (
+                          <TableCell key={index}>{count}</TableCell>
+                        ))}
+                        <TableCell>{candidate.estimatedDensityGcm3.toFixed(5)}</TableCell>
+                        <TableCell>{candidate.relativeDensityErrorPct.toFixed(3)}%</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="candidate-control">
+                <Field label="Direct multiplier n" type="number" min="1" value={selected?.multiplier ?? ""} onChange={(value) => selectCandidate(Number(value))} />
+                <Button variant="outline" size="sm" onClick={resetCandidate}>
+                  Reset to closest
+                </Button>
+              </div>
+            </Section>
+          )}
 
-      {context === "B" && <Section title="Stage B composition series" kicker={`${series.length} loading state(s)`}>{series.some((item) => item.result.metadata) ? <div className="table-scroll"><Table className="dense-table"><TableHeader><TableRow><TableHead>Loading</TableHead>{system.componentIds.map((id) => <TableHead key={id}>N {project.molecules.find((item) => item.id === id)?.abbreviation}</TableHead>)}<TableHead>Total molecules</TableHead><TableHead>x solute</TableHead><TableHead>w solute</TableHead><TableHead>Estimated ρ</TableHead><TableHead>Deviation</TableHead><TableHead>Resolution</TableHead></TableRow></TableHeader><TableBody>{series.map(({ point, result: row }) => <TableRow key={point.id}><TableCell><strong>N={point.soluteCount}</strong><small>{point.label}</small></TableCell>{system.componentIds.map((_, index) => <TableCell key={index}>{row.componentCounts?.[index] ?? "—"}</TableCell>)}<TableCell>{row.componentCounts ? row.componentCounts.reduce((sum, value) => sum + value, point.soluteCount) : "—"}</TableCell><TableCell>{row.metadata?.moleFractions[soluteId]?.toFixed(8) ?? "—"}</TableCell><TableCell>{row.metadata?.massFractions[soluteId]?.toFixed(8) ?? "—"}</TableCell><TableCell>{row.metadata?.estimatedDensityGcm3?.toFixed(6) ?? "—"}</TableCell><TableCell>{row.metadata?.densityDeviationPct === null || row.metadata?.densityDeviationPct === undefined ? "—" : `${row.metadata.densityDeviationPct.toFixed(4)}%`}</TableCell><TableCell>{row.metadata?.lockAcrossSeries ? "DES locked" : row.metadata?.densityResolution ?? "unavailable"}</TableCell></TableRow>)}</TableBody></Table></div> : <EmptyEvidence text="Provide density and molecular-weight inputs to generate the seven Stage B compositions."/>}</Section>}
-      {context === "C" && <Section title="Stage C temperature-dependent composition" kicker={`${temperatureSeries.length} temperature state(s)`}>{temperatureSeries.some((item) => item.result.metadata) ? <div className="table-scroll"><Table className="dense-table"><TableHeader><TableRow><TableHead>Temperature</TableHead><TableHead>Density used</TableHead><TableHead>Resolution</TableHead>{system.componentIds.map((id) => <TableHead key={id}>N {project.molecules.find((item) => item.id === id)?.abbreviation}</TableHead>)}<TableHead>x solute</TableHead><TableHead>Estimated ρ</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{temperatureSeries.map(({ temperature, result: row }) => <TableRow key={temperature}><TableCell>{temperature.toFixed(2)} K<br/><small>{(temperature - 273.15).toFixed(2)} °C</small></TableCell><TableCell>{row.metadata?.targetDensityGcm3?.toFixed(6) ?? "—"}</TableCell><TableCell>{row.metadata?.densityResolution ?? "unavailable"}</TableCell>{system.componentIds.map((_, index) => <TableCell key={index}>{row.componentCounts?.[index] ?? "—"}</TableCell>)}<TableCell>{row.metadata?.moleFractions[soluteId]?.toFixed(8) ?? "—"}</TableCell><TableCell>{row.metadata?.estimatedDensityGcm3?.toFixed(6) ?? "—"}</TableCell><TableCell><StatusBadge tone={row.diagnostics.some((item) => item.severity === "ERROR") ? "danger" : row.diagnostics.some((item) => item.severity === "WARNING") ? "warning" : "good"}>{row.diagnostics.some((item) => item.severity === "ERROR") ? "input required" : "resolved"}</StatusBadge></TableCell></TableRow>)}</TableBody></Table></div> : <EmptyEvidence text="Add exact or bracketed density records for the Stage C temperature series. Extrapolation is never performed silently."/>}</Section>}
-    </>}
-    {!system && <EmptyEvidence text="Create a solvent system before calculating box composition."/>}
-  </Section>
+          {metadata && usedCounts && (
+            <Section title="Resolved box composition" kicker="Summary">
+              <div className="metrics-row">
+                <Metric label="Box" value={`${dimensionsNm.x.toFixed(3)} × ${dimensionsNm.y.toFixed(3)} × ${dimensionsNm.z.toFixed(3)} nm`} />
+                <Metric label="Volume" value={`${boxVolumeNm3(project.protocol.box).toFixed(3)} nm³`} />
+                <Metric label="Total molecules" value={usedCounts.reduce((s, v) => s + v, activeSoluteId ? soluteCount : 0)} />
+                <Metric
+                  label="Estimated density"
+                  value={metadata.estimatedDensityGcm3 !== null ? `${metadata.estimatedDensityGcm3.toFixed(5)} g cm⁻³` : "add MWs to compute"}
+                />
+              </div>
+            </Section>
+          )}
+        </>
+      )}
+
+      {!system && <EmptyEvidence text="Create a molecular system above to configure box composition." />}
+    </Section>
+  )
 }
